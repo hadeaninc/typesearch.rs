@@ -1,0 +1,48 @@
+[package]
+name = "reeves-page"
+version = "0.1.0"
+authors = ["Aidan Hobson Sayers <aidanhs@cantab.net>"]
+edition = "2018"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+base64 = "0.10"
+bincode = "1.0"
+chrono = "0.4"
+decorum = "0.3.1"
+geojson = "0.16"
+log = "0.4"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+void = "1"
+wasm-bindgen = { version = "=0.2.62", features = ["serde-serialize"] }
+wasm-logger = "0.2"
+web-sys = { version = "0.3", features = [] }
+yew = "0.16.2"
+
+reeves-types = { path = "../reeves-types" }
+
+[profile.dev]
+opt-level = 1 # basic
+debug = true
+debug-assertions = true
+overflow-checks = true
+incremental = true
+lto = "thin"
+
+[profile.dev.package."*"]
+opt-level = 3 # all optimisations
+debug = 1 # line info only
+debug-assertions = true
+overflow-checks = true
+incremental = false
+
+[profile.release]
+opt-level = 3 # all optimisations
+debug = 1 # line info only
+debug-assertions = true
+overflow-checks = true
+incremental = false
+lto = "thin"

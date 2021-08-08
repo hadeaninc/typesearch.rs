@@ -1,0 +1,9 @@
+[package]
+name = "reeves-types"
+version = "0.1.0"
+authors = ["Aidan Hobson Sayers <aidanhs@cantab.net>"]
+edition = "2018"
+
+[dependencies]
+decorum = "0.3.1"
+serde = "1.0"
