@@ -223,7 +223,7 @@ impl Component for ReevesComponent {
                 {
                     for self.search_results.iter().map(|fndetail| {
                         html!{
-                            <div>{ &fndetail.s }</div>
+                            <div><code>{ &fndetail.s }</code></div>
                         }
                     })
                 }

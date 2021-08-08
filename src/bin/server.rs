@@ -6,7 +6,6 @@ use actix_web::http::header::{ContentEncoding, ContentType};
 use actix_web::middleware;
 use actix_web::web;
 use filesystem::{FakeFileSystem, FileSystem};
-use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::io::{self, BufReader, Read};

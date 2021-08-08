@@ -213,7 +213,8 @@ fn analyze_function(hirdb: &dyn HirDatabase, function: hir::Function, path: &str
     let ret_pretty = function.ret_type(hirdb).display(hirdb).to_string();
     eprintln!("fn {} ({:?} | {:?} | {:?} | {})", path,
         self_param_pretty, assoc_params_pretty, params_pretty, ret_pretty);
-    let s = format!("fn {} ({:?}) -> {}", path, assoc_params_pretty, ret_pretty);
+    let assoc_params_str = assoc_params_pretty.join(", ");
+    let s = format!("fn {}({}) -> {}", path, assoc_params_str, ret_pretty);
     vec![FnDetail {
         params: format!("{:?}", assoc_params_pretty),
         ret: ret_pretty,

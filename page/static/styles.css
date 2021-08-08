@@ -67,24 +67,19 @@ body {
     font-family: sans-serif;
 }
 
-h2 {
-    font-size: 1.4em;
-    font-weight: bold;
-    margin: 5px;
+header {
+    font-size: 2em;
+    text-align: center;
+    margin: 10px;
 }
 
-h3 {
-    font-size: 1em;
-    font-weight: bold;
-    margin: 3px;
+header > img {
+    vertical-align: bottom;
+    height: 1.5em;
 }
 
 code {
     font-family: monospace;
-}
-
-.border {
-    border: 1px solid black;
 }
 
 /* Common components */
@@ -106,7 +101,6 @@ code {
 #results-pane {
     margin: auto;
     padding: 10px;
-    font-family: monospace;
 }
 
 /* Control sub panes */
