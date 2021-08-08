@@ -1,0 +1,23 @@
+[package]
+name = "reeves"
+version = "0.1.0"
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+base_db = { path = "rust-analyzer/crates/base_db" }
+hir = { path = "rust-analyzer/crates/hir" }
+profile = { path = "rust-analyzer/crates/profile" }
+project_model = { path = "rust-analyzer/crates/project_model" }
+rust-analyzer = { path = "rust-analyzer/crates/rust-analyzer" }
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.dev]
+debug = 0
+
+[profile.release]
+incremental = true
+debug = 0 # Set this to 1 or 2 to get more useful backtraces in debugger.
