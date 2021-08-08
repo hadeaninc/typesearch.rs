@@ -210,12 +210,11 @@ impl Component for ReevesComponent {
         macro_rules! cb { ($x:expr) => { self.link.callback($x) } }
 
         html!{ <>
-            <div id="header-pane">
+            <div id="control-pane">
                 <header>
                     { "Reeves by Hadean" }
                 </header>
-            </div>
-            <div id="search-pane">
+                { maybenode(self.last_error.as_ref().map(String::as_str), error_div) }
                 { "Params:" }<input oninput=cb!(|data: InputData| ReevesMsg::ParamsChange(data.value))>{ &self.params }</input>
                 { "Ret:" }<input oninput=cb!(|data: InputData| ReevesMsg::RetChange(data.value))>{ &self.ret }</input>
                 <button onclick=cb!(|_| ReevesMsg::SearchRequest)>{ "Search" }</button>

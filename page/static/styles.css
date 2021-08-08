@@ -92,39 +92,22 @@ code {
 /* Top level */
 
 #reeves {
-    position: absolute;
-    top: 0;
-    right: 0;
-    bottom: 0;
-    left: 0;
-
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    grid-template-rows: repeat(5, 1fr);
-    grid-column-gap: 0px;
-    grid-row-gap: 0px;
-}
-
-#view-pane {
-    grid-area: 1 / 1 / 6 / 2;
-    padding: 10px;
-
-    overflow-y: scroll;
+    display: flex;
+    flex-direction: column;
+    flex-wrap: nowrap;
+    justify-content: center;
 }
 
 #control-pane {
-    grid-area: 1 / 2 / 6 / 3;
+    margin: auto;
     padding: 10px;
-    z-index: 1;
-
-    overflow-x: hidden;
-    overflow-y: hidden;
-
-    display: flex;
-    flex-direction: column;
 }
 
-/* Display sub panes */
+#results-pane {
+    margin: auto;
+    padding: 10px;
+    font-family: monospace;
+}
 
 /* Control sub panes */
 
@@ -136,4 +119,10 @@ code {
     color: red;
     font-weight: bold;
     border: 2px solid red;
+}
+
+/* Results sub panes */
+
+#results-pane > div {
+    margin: 5px;
 }
