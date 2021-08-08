@@ -266,10 +266,11 @@ fn analyze_adt(hirdb: &dyn HirDatabase, adt: hir::Adt, path: &str) -> Vec<FnDeta
     let methods: Vec<_> = methods.into_iter()
         .filter(|m| m.visibility(hirdb) == Visibility::Public).collect();
     eprintln!("adt {} {:?}", path, methods);
+    let mut fndetails = vec![];
     for method in methods {
-        analyze_function(hirdb, method, &(path.to_owned() + "::" + &method.name(hirdb).to_string()));
+        fndetails.extend(analyze_function(hirdb, method, &(path.to_owned() + "::" + &method.name(hirdb).to_string())));
     }
-    vec![]
+    fndetails
 }
 
 fn analyze_trait(hirdb: &dyn HirDatabase, tr: hir::Trait, path: &str) -> Vec<FnDetail> {
