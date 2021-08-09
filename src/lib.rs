@@ -5,7 +5,6 @@ use hir::Crate;
 use hir::ItemInNs;
 use hir::ModuleDef;
 use hir::Visibility;
-use hir::import_map::ImportInfo;
 use profile::StopWatch;
 use project_model::CargoConfig;
 use rust_analyzer::cli::load_cargo::{LoadCargoConfig, load_workspace_at};
@@ -31,15 +30,15 @@ pub fn open_db() -> sled::Db {
     db
 }
 
-pub fn analyze_and_save(db: &sled::Db, path: &Path, krate_name: &str) {
-    let fndetails = analyze(path, krate_name);
+pub fn analyze_and_save(db: &sled::Db, path: &Path) {
+    let (ref krate_name, fndetails) = analyze(path);
     eprintln!("finished printing functions, inserting {} function details into db", fndetails.len());
     purge_crate(db, krate_name);
     add_crate(db, krate_name, fndetails);
     eprintln!("finished inserting into db");
 }
 
-pub fn analyze(path: &Path, krate_name: &str) -> Vec<FnDetail> {
+pub fn analyze(path: &Path) -> (String, Vec<FnDetail>) {
     let mut db_load_sw = stop_watch();
     if !path.is_dir() {
         panic!("path is not a directory")
@@ -60,13 +59,15 @@ pub fn analyze(path: &Path, krate_name: &str) -> Vec<FnDetail> {
     let hirdb: &dyn HirDatabase = rootdb.upcast();
     let defdb: &dyn DefDatabase = rootdb.upcast();
 
+    let (krate_name, krate_import_name) = discover_crate_import_name(path, &cargo_config);
+
     let krates = Crate::all(hirdb);
     for krate in krates {
-        let canonical_name = krate.display_name(hirdb).unwrap().canonical_name().to_owned();
-        if canonical_name != krate_name {
+        let display_name = krate.display_name(hirdb).unwrap().to_string();
+        if krate_import_name != display_name {
             continue
         }
-        eprintln!("found crate: {:?}", krate_name);
+        eprintln!("found crate: {:?} (import name {})", krate_name, display_name);
         let mut moddefs = HashSet::new();
         let import_map = defdb.import_map(krate.into());
         let mut fndetails = vec![];
@@ -77,25 +78,25 @@ pub fn analyze(path: &Path, krate_name: &str) -> Vec<FnDetail> {
             if !isnew { continue }
             let path = &importinfo.path.to_string();
             let import_fndetails = match moddef {
-                ModuleDef::Function(f) => analyze_function(hirdb, krate_name, f, path),
-                ModuleDef::Adt(a) => analyze_adt(hirdb, krate_name, a, path),
-                ModuleDef::Trait(t) => analyze_trait(hirdb, krate_name, t, path),
+                ModuleDef::Function(f) => analyze_function(hirdb, &krate_name, f, path),
+                ModuleDef::Adt(a) => analyze_adt(hirdb, &krate_name, a, path),
+                ModuleDef::Trait(t) => analyze_trait(hirdb, &krate_name, t, path),
                 x @ ModuleDef::Variant(_) |
                 x @ ModuleDef::Const(_) |
                 x @ ModuleDef::Static(_) |
                 x @ ModuleDef::Module(_) |
                 x @ ModuleDef::TypeAlias(_) |
                 x @ ModuleDef::BuiltinType(_) => {
-                    eprintln!("skipping ty {} {:?}", x.name(hirdb).unwrap(), x);
+                    eprintln!("skipping ty {:?} {:?}", x.name(hirdb), x);
                     vec![]
                 },
             };
             fndetails.extend(import_fndetails);
             eprintln!("");
         }
-        return fndetails
+        return (krate_name, fndetails)
     }
-    panic!("didn't find crate {}!", krate_name)
+    panic!("didn't find crate {} (import name {})!", krate_name, krate_import_name)
 }
 
 pub fn search(db: &sled::Db, params_search: Option<Vec<String>>, ret_search: Option<String>) -> Vec<FnDetail> {
@@ -165,6 +166,32 @@ pub fn debugdb(db: &sled::Db) {
     }
 }
 
+fn discover_crate_import_name(path: &Path, cargo_config: &CargoConfig) -> (String, String) {
+    // If you want to see some of the complexity here:
+    // - md-5 package name is 'md-5', but target name (and import name) is 'md5'
+    //
+    // We are taking crates from crates.io, so we can assume:
+    // - there is only one package (i.e. not a workspace)
+    // - there is only one lib
+    use project_model::{ProjectManifest, ProjectWorkspace, TargetKind};
+    use std::convert::TryInto;
+    let p: &_ = path.try_into().unwrap();
+    let root = ProjectManifest::discover_single(&p).unwrap();
+    let ws = ProjectWorkspace::load(root, cargo_config, &|_| {}).unwrap();
+    //eprintln!("{:#?}", ws);
+    let cargo = match ws {
+        ProjectWorkspace::Cargo { cargo, .. } => cargo,
+        _ => panic!("unexpected workspace type"),
+    };
+    //eprintln!("{:#?}", cargo);
+    let members = cargo.packages().map(|pd| &cargo[pd]).filter(|pd| pd.is_member).collect::<Vec<_>>();
+    assert_eq!(members.len(), 1, "{:?}", members);
+    let lib_targets = members[0].targets.iter().map(|&t| &cargo[t]).filter(|t| t.kind == TargetKind::Lib).collect::<Vec<_>>();
+    assert_eq!(lib_targets.len(), 1, "{:?}", lib_targets);
+    //eprintln!("{:?} {:?}", members[0].name, lib_targets[0].name);
+    (members[0].name.clone(), lib_targets[0].name.replace('-', "_"))
+}
+
 fn add_crate(db: &sled::Db, name: &str, fndetails: Vec<FnDetail>) -> u64 {
     let param_tree = db.open_tree("param").unwrap();
     let ret_tree = db.open_tree("ret").unwrap();
@@ -231,8 +258,8 @@ fn purge_crate(db: &sled::Db, name: &str) {
                 for param in params {
                     let mut param_set: HashSet<u64> = param_tree.get(&param).unwrap()
                         .map(|d| bincode::deserialize(d.as_ref()).unwrap()).unwrap_or_else(HashSet::new);
-                    let didremove = param_set.remove(&fn_id);
-                    assert!(didremove, "{:?}", fndetail.s);
+                    // May not be deleted if multiple params of the same type
+                    let _didremove = param_set.remove(&fn_id);
                     param_tree.insert(param.as_bytes(), bincode::serialize(&param_set).unwrap()).unwrap();
                 }
 

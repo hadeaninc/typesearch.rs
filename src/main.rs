@@ -9,24 +9,24 @@ use std::process::Command;
 fn main() {
     let args: Vec<_> = env::args().collect();
     if args[1] != "x" {
-        Command::new("./rust-analyzer/target/release/rust-analyzer")
-            .args(env::args_os().skip(1))
-            .exec();
+        // We need this because some parts of RA can execute themselves
+        let mut cmd = match env::var_os("RUST_ANALYZER_BINARY") {
+            Some(v) => Command::new(v),
+            None => Command::new("./rust-analyzer/target/release/rust-analyzer"),
+        };
+        cmd.args(env::args_os().skip(1)).exec();
         panic!("did not exec");
     }
 
-
     if args[2] == "analyze" {
         let path: &Path = args[3].as_ref();
-        let name: &str = &args[4];
 
         let db = reeves::open_db();
-        reeves::analyze_and_save(&db, path, name)
+        reeves::analyze_and_save(&db, path)
     } else if args[2] == "analyze-print" {
         let path: &Path = args[3].as_ref();
-        let name: &str = &args[4];
 
-        let fndetails = reeves::analyze(path, name);
+        let (_krate_name, fndetails) = reeves::analyze(path);
         let out = serde_json::to_vec(&fndetails).unwrap();
         io::stdout().write_all(&out).unwrap();
     } else if args[2] == "search" {
