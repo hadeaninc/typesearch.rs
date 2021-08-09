@@ -20,7 +20,7 @@ fn main() {
         let path: &Path = args[3].as_ref();
         let name: &str = &args[4];
 
-        reeves::analyze(&db, path, name)
+        reeves::analyze_and_save(&db, path, name)
     } else if args[2] == "search" {
         let params_search = &args[3];
         let params_search: Vec<_> = if params_search.is_empty() {

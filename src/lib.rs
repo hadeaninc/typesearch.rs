@@ -1,4 +1,4 @@
-use base_db::{SourceDatabase, Upcast};
+use base_db::Upcast;
 use hir::db::{DefDatabase, HirDatabase};
 use hir::{HasVisibility, HirDisplay};
 use hir::Crate;
@@ -31,7 +31,15 @@ pub fn open_db() -> sled::Db {
     db
 }
 
-pub fn analyze(db: &sled::Db, path: &Path, name: &str) {
+pub fn analyze_and_save(db: &sled::Db, path: &Path, krate_name: &str) {
+    let fndetails = analyze(path, krate_name);
+    eprintln!("finished printing functions, inserting {} function details into db", fndetails.len());
+    purge_crate(db, krate_name);
+    add_crate(db, krate_name, fndetails);
+    eprintln!("finished inserting into db");
+}
+
+pub fn analyze(path: &Path, krate_name: &str) -> Vec<FnDetail> {
     let mut db_load_sw = stop_watch();
     if !path.is_dir() {
         panic!("path is not a directory")
@@ -52,14 +60,12 @@ pub fn analyze(db: &sled::Db, path: &Path, name: &str) {
     let hirdb: &dyn HirDatabase = rootdb.upcast();
     let defdb: &dyn DefDatabase = rootdb.upcast();
 
-    let mut did_find_crate = false;
     let krates = Crate::all(hirdb);
     for krate in krates {
-        let krate_name = krate.display_name(hirdb).unwrap().canonical_name().to_owned();
-        if krate_name != name {
+        let canonical_name = krate.display_name(hirdb).unwrap().canonical_name().to_owned();
+        if canonical_name != krate_name {
             continue
         }
-        did_find_crate = true;
         eprintln!("found crate: {:?}", krate_name);
         let mut moddefs = HashSet::new();
         let import_map = defdb.import_map(krate.into());
@@ -87,13 +93,9 @@ pub fn analyze(db: &sled::Db, path: &Path, name: &str) {
             fndetails.extend(import_fndetails);
             eprintln!("");
         }
-        eprintln!("finished printing functions, inserting {} function details into db", fndetails.len());
-        purge_crate(db, &krate_name);
-        add_crate(db, &krate_name, fndetails);
-        eprintln!("finished inserting into db");
-        return;
+        return fndetails
     }
-    panic!("didn't find crate {}!", name)
+    panic!("didn't find crate {}!", krate_name)
 }
 
 pub fn search(db: &sled::Db, params_search: Option<Vec<String>>, ret_search: Option<String>) -> Vec<FnDetail> {
