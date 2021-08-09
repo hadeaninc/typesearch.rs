@@ -1,4 +1,4 @@
-use base_db::Upcast;
+use base_db::{SourceDatabase, Upcast};
 use hir::db::{DefDatabase, HirDatabase};
 use hir::{HasVisibility, HirDisplay};
 use hir::Crate;
@@ -24,7 +24,11 @@ fn stop_watch() -> StopWatch {
 }
 
 pub fn open_db() -> sled::Db {
-    sled::open("reeves.db").unwrap()
+    let db = sled::open("reeves.db").unwrap();
+    if !db.contains_key("next_fn_id").unwrap() {
+        db.insert("next_fn_id", bincode::serialize(&0u64).unwrap()).unwrap();
+    }
+    db
 }
 
 pub fn analyze(db: &sled::Db, path: &Path, name: &str) {
@@ -48,18 +52,15 @@ pub fn analyze(db: &sled::Db, path: &Path, name: &str) {
     let hirdb: &dyn HirDatabase = rootdb.upcast();
     let defdb: &dyn DefDatabase = rootdb.upcast();
 
-    if !db.contains_key("next_fn_id").unwrap() {
-        db.insert("next_fn_id", bincode::serialize(&0u64).unwrap()).unwrap();
-    }
-
+    let mut did_find_crate = false;
     let krates = Crate::all(hirdb);
     for krate in krates {
-        let krate_display_name = krate.display_name(hirdb).unwrap();
-        if krate_display_name.to_string() != name {
+        let krate_name = krate.display_name(hirdb).unwrap().canonical_name().to_owned();
+        if krate_name != name {
             continue
         }
-        eprintln!("{:?}", krate_display_name);
-        eprintln!("");
+        did_find_crate = true;
+        eprintln!("found crate: {:?}", krate_name);
         let mut moddefs = HashSet::new();
         let import_map = defdb.import_map(krate.into());
         let mut fndetails = vec![];
@@ -87,10 +88,12 @@ pub fn analyze(db: &sled::Db, path: &Path, name: &str) {
             eprintln!("");
         }
         eprintln!("finished printing functions, inserting {} function details into db", fndetails.len());
-        purge_crate(db, &krate_display_name.to_string());
-        add_crate(db, &krate_display_name.to_string(), fndetails);
+        purge_crate(db, &krate_name);
+        add_crate(db, &krate_name, fndetails);
         eprintln!("finished inserting into db");
+        return;
     }
+    panic!("didn't find crate {}!", name)
 }
 
 pub fn search(db: &sled::Db, params_search: Option<Vec<String>>, ret_search: Option<String>) -> Vec<FnDetail> {
@@ -178,15 +181,15 @@ fn add_crate(db: &sled::Db, name: &str, fndetails: Vec<FnDetail>) -> u64 {
                 for param in params.iter() {
                     let mut param_set = param_tree.get(param).unwrap()
                         .map(|d| bincode::deserialize(d.as_ref()).unwrap()).unwrap_or_else(HashSet::new);
-                    let isnew = param_set.insert(fn_id);
-                    assert!(isnew);
+                    // May not be new if multiple params of the same type
+                    let _isnew = param_set.insert(fn_id);
                     param_tree.insert(param.as_bytes(), bincode::serialize(&param_set).unwrap()).unwrap();
                 }
 
                 let mut ret_set = ret_tree.get(&fndetail.ret).unwrap()
                     .map(|d| bincode::deserialize(d.as_ref()).unwrap()).unwrap_or_else(HashSet::new);
                 let isnew = ret_set.insert(fn_id);
-                assert!(isnew);
+                assert!(isnew, "{:?}", fndetail.s);
                 ret_tree.insert(fndetail.ret.as_bytes(), bincode::serialize(&ret_set).unwrap()).unwrap();
 
                 fn_tree.insert(bincode::serialize(&fn_id).unwrap(), bincode::serialize(fndetail).unwrap()).unwrap();
@@ -227,14 +230,14 @@ fn purge_crate(db: &sled::Db, name: &str) {
                     let mut param_set: HashSet<u64> = param_tree.get(&param).unwrap()
                         .map(|d| bincode::deserialize(d.as_ref()).unwrap()).unwrap_or_else(HashSet::new);
                     let didremove = param_set.remove(&fn_id);
-                    assert!(didremove);
+                    assert!(didremove, "{:?}", fndetail.s);
                     param_tree.insert(param.as_bytes(), bincode::serialize(&param_set).unwrap()).unwrap();
                 }
 
                 let mut ret_set: HashSet<u64> = ret_tree.get(&fndetail.ret).unwrap()
                     .map(|d| bincode::deserialize(d.as_ref()).unwrap()).unwrap_or_else(HashSet::new);
                 let didremove = ret_set.remove(&fn_id);
-                assert!(didremove);
+                assert!(didremove, "{:?}", fndetail.s);
                 ret_tree.insert(fndetail.ret.as_bytes(), bincode::serialize(&ret_set).unwrap()).unwrap();
             }
             Ok(())
