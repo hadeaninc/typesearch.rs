@@ -60,6 +60,22 @@ elif [ "$1" = run ]; then
     shift
     RUST_LOG=$RUST_LOG ./target/debug/reeves "$@"
 
+elif [ "$1" = prep-container ]; then
+    shift
+    rm -rf container-state
+    mkdir container-state
+    cd container-state
+    export RUSTUP_HOME=$(pwd)/rustup
+    export CARGO_HOME=$(pwd)/cargo
+    export PATH=$PATH:$(pwd)/cargo/bin
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --no-modify-path --default-toolchain 1.54.0 --profile minimal -y --quiet
+    rustup component add rust-src
+    # Apparently this is the best way to update the registry - https://github.com/rust-lang/crater/pull/301/files
+    cargo install lazy_static || true
+    podman pull ubuntu:20.04
+
+    #podman run -it --rm --net none -w /work -e RUSTUP_HOME=/work/rustup -e CARGO_HOME=/work/cargo -v $(pwd):/work -v /home/aidanhs/work/reeves:/ra ubuntu:20.04 bash
+
 elif [ "$1" = srv ]; then
     shift
     ./script.sh build
