@@ -77,9 +77,9 @@ pub fn analyze(path: &Path, krate_name: &str) -> Vec<FnDetail> {
             if !isnew { continue }
             let path = &importinfo.path.to_string();
             let import_fndetails = match moddef {
-                ModuleDef::Function(f) => analyze_function(hirdb, f, path),
-                ModuleDef::Adt(a) => analyze_adt(hirdb, a, path),
-                ModuleDef::Trait(t) => analyze_trait(hirdb, t, path),
+                ModuleDef::Function(f) => analyze_function(hirdb, krate_name, f, path),
+                ModuleDef::Adt(a) => analyze_adt(hirdb, krate_name, a, path),
+                ModuleDef::Trait(t) => analyze_trait(hirdb, krate_name, t, path),
                 x @ ModuleDef::Variant(_) |
                 x @ ModuleDef::Const(_) |
                 x @ ModuleDef::Static(_) |
@@ -247,7 +247,7 @@ fn purge_crate(db: &sled::Db, name: &str) {
     let () = ret.unwrap();
 }
 
-fn analyze_function(hirdb: &dyn HirDatabase, function: hir::Function, path: &str) -> Vec<FnDetail> {
+fn analyze_function(hirdb: &dyn HirDatabase, krate_name: &str, function: hir::Function, path: &str) -> Vec<FnDetail> {
     let self_param_pretty = function.self_param(hirdb)
         .map(|param| param.display(hirdb).to_string());
     let assoc_params_pretty = function.assoc_fn_params(hirdb)
@@ -263,13 +263,14 @@ fn analyze_function(hirdb: &dyn HirDatabase, function: hir::Function, path: &str
     let assoc_params_str = assoc_params_pretty.join(", ");
     let s = format!("fn {}({}) -> {}", path, assoc_params_str, ret_pretty);
     vec![FnDetail {
+        krate: krate_name.to_owned(),
         params: assoc_params_pretty,
         ret: ret_pretty,
         s,
     }]
 }
 
-fn analyze_adt(hirdb: &dyn HirDatabase, adt: hir::Adt, path: &str) -> Vec<FnDetail> {
+fn analyze_adt(hirdb: &dyn HirDatabase, krate_name: &str, adt: hir::Adt, path: &str) -> Vec<FnDetail> {
     let mut methods = vec![];
     let ty = adt.ty(hirdb);
     let krate = adt.module(hirdb).krate();
@@ -286,12 +287,12 @@ fn analyze_adt(hirdb: &dyn HirDatabase, adt: hir::Adt, path: &str) -> Vec<FnDeta
     eprintln!("adt {} {:?}", path, methods);
     let mut fndetails = vec![];
     for method in methods {
-        fndetails.extend(analyze_function(hirdb, method, &(path.to_owned() + "::" + &method.name(hirdb).to_string())));
+        fndetails.extend(analyze_function(hirdb, krate_name, method, &(path.to_owned() + "::" + &method.name(hirdb).to_string())));
     }
     fndetails
 }
 
-fn analyze_trait(hirdb: &dyn HirDatabase, tr: hir::Trait, path: &str) -> Vec<FnDetail> {
+fn analyze_trait(hirdb: &dyn HirDatabase, _krate_name: &str, tr: hir::Trait, path: &str) -> Vec<FnDetail> {
     eprintln!("trait {} {:?}", path, tr.items(hirdb));
     vec![]
 }

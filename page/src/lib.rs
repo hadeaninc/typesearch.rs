@@ -273,7 +273,13 @@ impl Component for ReevesComponent {
                 {
                     for self.search_results.iter().map(|fndetail| {
                         html!{
-                            <div><code>{ &fndetail.s }</code></div>
+                            <div>
+                                <a href={ format!("https://crates.io/crates/{}", fndetail.krate) }>
+                                    { &fndetail.krate }
+                                </a>
+                                { " " }
+                                <code>{ &fndetail.s }</code>
+                            </div>
                         }
                     })
                 }

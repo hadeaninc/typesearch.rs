@@ -4,6 +4,7 @@ use serde::{Serialize, Deserialize};
 #[serde(deny_unknown_fields)]
 #[derive(Debug)]
 pub struct FnDetail {
+    pub krate: String,
     pub params: Vec<String>,
     pub ret: String,
     pub s: String,
