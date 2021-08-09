@@ -2266,6 +2266,7 @@ dependencies = [
  "reeves-types",
  "rust-analyzer",
  "serde",
+ "serde_json",
  "sled",
  "tar",
  "void",

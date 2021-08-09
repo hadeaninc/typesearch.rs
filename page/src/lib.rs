@@ -251,7 +251,7 @@ impl Component for ReevesComponent {
                 <div id="parsed-pane">
                     <h2>{ "Parsed search" }</h2>
                     <div>
-                        { "Params: " }
+                        { "Params (any order): " }
                         { match self.parsed_params.as_ref() {
                             Some(pps) if pps.is_empty() => html!{ "[no params]" },
                             Some(pps) => html!{
