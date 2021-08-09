@@ -4,7 +4,7 @@ use serde::{Serialize, Deserialize};
 #[serde(deny_unknown_fields)]
 #[derive(Debug)]
 pub struct FnDetail {
-    pub params: String,
+    pub params: Vec<String>,
     pub ret: String,
     pub s: String,
 }
@@ -16,8 +16,8 @@ pub mod proto {
     #[serde(deny_unknown_fields)]
     #[derive(Debug)]
     pub struct SearchRequest {
-        pub params: String,
-        pub ret: String,
+        pub params: Option<Vec<String>>,
+        pub ret: Option<String>,
     }
 
     #[derive(Serialize, Deserialize)]

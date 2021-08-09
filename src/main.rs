@@ -23,8 +23,18 @@ fn main() {
         reeves::analyze(&db, path, name)
     } else if args[2] == "search" {
         let params_search = &args[3];
+        let params_search: Vec<_> = if params_search.is_empty() {
+            vec![]
+        } else {
+            params_search.split(",").map(|s| s.trim().to_owned()).collect()
+        };
         let ret_search = &args[4];
-        let fndetails = reeves::search(&db, params_search, ret_search);
+        let ret_search = if ret_search.is_empty() {
+            None
+        } else {
+            Some(ret_search.to_owned())
+        };
+        let fndetails = reeves::search(&db, Some(params_search), ret_search);
         for fndetail in fndetails {
             println!("res: {}", fndetail.s)
         }

@@ -36,8 +36,8 @@ pub fn analyze(db: &sled::Db, path: &Path, name: &str) {
     let mut cargo_config = CargoConfig::default();
     cargo_config.no_sysroot = false;
     let load_cargo_config = LoadCargoConfig {
-        load_out_dirs_from_check: true, // build scripts
-        with_proc_macro: true,
+        load_out_dirs_from_check: false, // build scripts
+        with_proc_macro: false,
         prefill_caches: false,
     };
     let (host, _vfs, _proc_macro) =
@@ -93,21 +93,50 @@ pub fn analyze(db: &sled::Db, path: &Path, name: &str) {
     }
 }
 
-pub fn search(db: &sled::Db, params_search: &str, ret_search: &str) -> Vec<FnDetail> {
-    let params_tree = db.open_tree("params").unwrap();
+pub fn search(db: &sled::Db, params_search: Option<Vec<String>>, ret_search: Option<String>) -> Vec<FnDetail> {
+    let param_tree = db.open_tree("param").unwrap();
     let ret_tree = db.open_tree("ret").unwrap();
     let fn_tree = db.open_tree("fn").unwrap();
 
-    let match_fns_params: HashSet<u64> = params_tree.get(params_search).unwrap()
-        .map(|ivec| bincode::deserialize(&ivec).unwrap()).unwrap_or_else(HashSet::new);
-    let match_fns_ret: HashSet<u64> = ret_tree.get(ret_search).unwrap()
-        .map(|ivec| bincode::deserialize(&ivec).unwrap()).unwrap_or_else(HashSet::new);
+    if params_search.is_none() && ret_search.is_none() {
+        return vec![]
+    }
+
+    let mut match_fns: Option<HashSet<u64>> = None;
+
+    if let Some(ret_search) = ret_search {
+        match_fns = Some(ret_tree.get(ret_search).unwrap()
+            .map(|ivec| bincode::deserialize(&ivec).unwrap()).unwrap_or_else(HashSet::new))
+    }
+
+    if let Some(mut params_search) = params_search {
+        if params_search.is_empty() {
+            params_search = vec!["<NOARGS>".into()];
+        }
+        for param in params_search {
+            let match_fns_param: HashSet<u64> = param_tree.get(param).unwrap()
+                .map(|ivec| bincode::deserialize(&ivec).unwrap()).unwrap_or_else(HashSet::new);
+            let new_match_fns = if let Some(match_fns) = match_fns.take() {
+                match_fns.intersection(&match_fns_param).cloned().collect()
+            } else {
+                match_fns_param
+            };
+            if new_match_fns.is_empty() {
+                return vec![]
+            }
+            match_fns = Some(new_match_fns)
+        }
+    }
+
     let mut ret = vec![];
-    for fn_id in match_fns_params.intersection(&match_fns_ret) {
-        let fn_bytes = fn_tree.get(fn_id.to_le_bytes()).unwrap().unwrap();
+    for fn_id in match_fns.expect("no match fns, but should have been caught earlier") {
+        let fn_bytes = fn_tree.get(bincode::serialize(&fn_id).unwrap()).unwrap().unwrap();
         let fndetail: FnDetail = bincode::deserialize(&fn_bytes).unwrap();
         ret.push(fndetail);
     }
+
+    ret.sort_by(|fd1, fd2| fd1.s.cmp(&fd2.s));
+
     ret
 }
 
@@ -132,20 +161,27 @@ pub fn debugdb(db: &sled::Db) {
 }
 
 fn add_crate(db: &sled::Db, name: &str, fndetails: Vec<FnDetail>) -> u64 {
-    let params_tree = db.open_tree("params").unwrap();
+    let param_tree = db.open_tree("param").unwrap();
     let ret_tree = db.open_tree("ret").unwrap();
     let fn_tree = db.open_tree("fn").unwrap();
     let crate_tree = db.open_tree("crate").unwrap();
-    let ret: Result<u64, TransactionError<Void>> = (&**db, &params_tree, &ret_tree, &fn_tree, &crate_tree)
-        .transaction(|(db, params_tree, ret_tree, fn_tree, crate_tree)| {
+    let ret: Result<u64, TransactionError<Void>> = (&**db, &param_tree, &ret_tree, &fn_tree, &crate_tree)
+        .transaction(|(db, param_tree, ret_tree, fn_tree, crate_tree)| {
             let mut fn_id: u64 = bincode::deserialize(&db.get("next_fn_id").unwrap().unwrap()).unwrap();
             let mut fn_ids = vec![];
+            let nil_params: Vec<String> = vec!["<NOARGS>".into()];
             for fndetail in fndetails.iter() {
-                let mut params_set = params_tree.get(&fndetail.params).unwrap()
-                    .map(|d| bincode::deserialize(d.as_ref()).unwrap()).unwrap_or_else(HashSet::new);
-                let isnew = params_set.insert(fn_id);
-                assert!(isnew);
-                params_tree.insert(fndetail.params.as_bytes(), bincode::serialize(&params_set).unwrap()).unwrap();
+                let mut params = &fndetail.params;
+                if params.is_empty() {
+                    params = &nil_params;
+                }
+                for param in params.iter() {
+                    let mut param_set = param_tree.get(param).unwrap()
+                        .map(|d| bincode::deserialize(d.as_ref()).unwrap()).unwrap_or_else(HashSet::new);
+                    let isnew = param_set.insert(fn_id);
+                    assert!(isnew);
+                    param_tree.insert(param.as_bytes(), bincode::serialize(&param_set).unwrap()).unwrap();
+                }
 
                 let mut ret_set = ret_tree.get(&fndetail.ret).unwrap()
                     .map(|d| bincode::deserialize(d.as_ref()).unwrap()).unwrap_or_else(HashSet::new);
@@ -168,12 +204,12 @@ fn add_crate(db: &sled::Db, name: &str, fndetails: Vec<FnDetail>) -> u64 {
 }
 
 fn purge_crate(db: &sled::Db, name: &str) {
-    let params_tree = db.open_tree("params").unwrap();
+    let param_tree = db.open_tree("param").unwrap();
     let ret_tree = db.open_tree("ret").unwrap();
     let fn_tree = db.open_tree("fn").unwrap();
     let crate_tree = db.open_tree("crate").unwrap();
-    let ret: Result<(), TransactionError<Void>> = (&**db, &params_tree, &ret_tree, &fn_tree, &crate_tree)
-        .transaction(|(_db, params_tree, ret_tree, fn_tree, crate_tree)| {
+    let ret: Result<(), TransactionError<Void>> = (&**db, &param_tree, &ret_tree, &fn_tree, &crate_tree)
+        .transaction(|(_db, param_tree, ret_tree, fn_tree, crate_tree)| {
             let fn_ids: Vec<u64> = match crate_tree.remove(name).unwrap() {
                 Some(fn_ids) => bincode::deserialize(&fn_ids).unwrap(),
                 None => return Ok(()),
@@ -183,11 +219,17 @@ fn purge_crate(db: &sled::Db, name: &str) {
                 .map(|(fn_id, bytes)| (fn_id, bincode::deserialize(&bytes).unwrap()))
                 .collect();
             for (fn_id, fndetail) in fndetails {
-                let mut params_set: HashSet<u64> = params_tree.get(&fndetail.params).unwrap()
-                    .map(|d| bincode::deserialize(d.as_ref()).unwrap()).unwrap_or_else(HashSet::new);
-                let didremove = params_set.remove(&fn_id);
-                assert!(didremove);
-                params_tree.insert(fndetail.params.as_bytes(), bincode::serialize(&params_set).unwrap()).unwrap();
+                let mut params = fndetail.params;
+                if params.is_empty() {
+                    params = vec!["<NOARGS>".into()];
+                }
+                for param in params {
+                    let mut param_set: HashSet<u64> = param_tree.get(&param).unwrap()
+                        .map(|d| bincode::deserialize(d.as_ref()).unwrap()).unwrap_or_else(HashSet::new);
+                    let didremove = param_set.remove(&fn_id);
+                    assert!(didremove);
+                    param_tree.insert(param.as_bytes(), bincode::serialize(&param_set).unwrap()).unwrap();
+                }
 
                 let mut ret_set: HashSet<u64> = ret_tree.get(&fndetail.ret).unwrap()
                     .map(|d| bincode::deserialize(d.as_ref()).unwrap()).unwrap_or_else(HashSet::new);
@@ -216,7 +258,7 @@ fn analyze_function(hirdb: &dyn HirDatabase, function: hir::Function, path: &str
     let assoc_params_str = assoc_params_pretty.join(", ");
     let s = format!("fn {}({}) -> {}", path, assoc_params_str, ret_pretty);
     vec![FnDetail {
-        params: format!("{:?}", assoc_params_pretty),
+        params: assoc_params_pretty,
         ret: ret_pretty,
         s,
     }]

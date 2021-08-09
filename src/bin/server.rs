@@ -76,7 +76,7 @@ type ServerData = web::Data<MyServerData>;
 
 async fn srv_post_reeves_search(state: ServerData, body: web::Bytes) -> impl Responder {
     let proto::SearchRequest { params, ret } = bincode::deserialize(&body).unwrap();
-    let fndetails = reeves::search(&state.s.db, &params, &ret);
+    let fndetails = reeves::search(&state.s.db, params, ret);
     let ret = proto::SearchResult {
         fndetails,
     };

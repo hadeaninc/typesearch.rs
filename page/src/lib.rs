@@ -5,16 +5,12 @@ extern crate log;
 
 extern crate reeves_types;
 
-use std::cmp;
 use std::collections::BTreeMap;
-use std::f64;
 use std::rc::Rc;
 use std::sync::Mutex;
-use void::Void;
 use wasm_bindgen::prelude::*;
-use wasm_bindgen::JsCast;
 use yew::prelude::*;
-use yew::format::{Binary, Nothing};
+use yew::format::Binary;
 use yew::services::fetch::{FetchService, FetchTask, Request, Response};
 
 use reeves_types::*;
@@ -33,6 +29,9 @@ pub fn main() {
     let elt = document.query_selector("#reeves").expect("Error in document query").expect("Failed to find app mount");
     let env = app.mount(elt);
     info!("Mounted app...");
+
+    env.send_message(ReevesMsg::ParamsChange("&EntryType".into()));
+    env.send_message(ReevesMsg::RetChange("bool".into()));
 
     yew::run_loop();
 }
@@ -131,7 +130,9 @@ pub struct ReevesComponent {
 
     // User state
     params: String,
+    parsed_params: Option<Vec<String>>,
     ret: String,
+    parsed_ret: Option<String>,
 
     // Maintained state
     last_error: Option<String>,
@@ -153,8 +154,10 @@ impl Component for ReevesComponent {
         let ret = Self {
             search_results: vec![],
 
-            params: String::new(),
-            ret: String::new(),
+            params: String::from("*"),
+            parsed_params: None,
+            ret: String::from("*"),
+            parsed_ret: None,
 
             last_error: None,
 
@@ -171,7 +174,9 @@ impl Component for ReevesComponent {
             ReevesMsg::SearchRequest => {
                 info!("Doing search for {:?} {:?}", self.params, self.ret);
 
-                let sr = proto::SearchRequest { params: self.params.clone(), ret: self.ret.clone() };
+                let params = self.parsed_params.clone();
+                let ret = self.parsed_ret.clone();
+                let sr = proto::SearchRequest { params, ret };
                 self.api.post_search(self.msg_callback.clone(), sr);
 
                 false
@@ -186,10 +191,23 @@ impl Component for ReevesComponent {
 
             ReevesMsg::ParamsChange(val) => {
                 self.params = val;
+                self.parsed_params = if self.params.trim() != "*" {
+                    Some(self.params.trim().split(',')
+                        .map(|s| s.trim().to_owned())
+                        .filter(|s| !s.is_empty())
+                        .collect())
+                } else {
+                    None
+                };
                 true
             },
             ReevesMsg::RetChange(val) => {
                 self.ret = val;
+                self.parsed_ret = match self.ret.trim() {
+                    "" => None,
+                    "*" => None,
+                    r => Some(r.to_owned()),
+                };
                 true
             },
 
@@ -215,8 +233,40 @@ impl Component for ReevesComponent {
                     { "Reeves by Hadean" }
                 </header>
                 { maybenode(self.last_error.as_ref().map(String::as_str), error_div) }
-                { "Params:" }<input oninput=cb!(|data: InputData| ReevesMsg::ParamsChange(data.value))>{ &self.params }</input>
-                { "Ret:" }<input oninput=cb!(|data: InputData| ReevesMsg::RetChange(data.value))>{ &self.ret }</input>
+                <div id="search-pane"><code>
+                    { "fn ???(" }
+                    <input
+                        placeholder="[no params]"
+                        oninput=cb!(|data: InputData| ReevesMsg::ParamsChange(data.value))
+                        value={ &self.params }
+                        ></input>
+                    { ") -> "}
+                    <input
+                        placeholder="[any return type]"
+                        oninput=cb!(|data: InputData| ReevesMsg::RetChange(data.value))
+                        value={ &self.ret }
+                        ></input>
+                </code></div>
+                <small>{ "Use * to indicate '<any>'" }</small>
+                <div id="parsed-pane">
+                    <h2>{ "Parsed search" }</h2>
+                    <div>
+                        { "Params: " }
+                        { match self.parsed_params.as_ref() {
+                            Some(pps) if pps.is_empty() => html!{ "[no params]" },
+                            Some(pps) => html!{
+                                { for pps.iter().map(|pp| html!{ <code class="bordered">{ pp }</code> }) }
+                            },
+                            None => html!{ "[any]" },
+                        } }
+                        <br></br>
+                        { "Ret: " }
+                        { match self.parsed_ret.as_ref() {
+                            Some(ret) => html!{ <code class="bordered">{ ret }</code> },
+                            None => html!{ "[any]" },
+                        } }
+                    </div>
+                </div>
                 <button onclick=cb!(|_| ReevesMsg::SearchRequest)>{ "Search" }</button>
             </div>
             <div id="results-pane">

@@ -73,6 +73,14 @@ header {
     margin: 10px;
 }
 
+small {
+    font-size: 0.7em;
+}
+
+h2 {
+    font-size: 1.2em;
+}
+
 header > img {
     vertical-align: bottom;
     height: 1.5em;
@@ -104,6 +112,21 @@ code {
 }
 
 /* Control sub panes */
+
+#control-pane .bordered {
+    border: 1px solid black;
+    margin: 2px;
+    padding: 2px;
+}
+
+#search-pane {
+    font-size: 1.5em;
+}
+
+#parsed-pane {
+    margin-top: 10px;
+    margin-bottom: 10px;
+}
 
 .error {
     flex: none;
