@@ -230,7 +230,7 @@ impl Component for ReevesComponent {
         html!{ <>
             <div id="control-pane">
                 <header>
-                    { "Reeves by Hadean" }
+                    { "Reeves by Hadean" }<img src="https://avatars.githubusercontent.com/u/13240906?s=50&v=4"></img>
                 </header>
                 { maybenode(self.last_error.as_ref().map(String::as_str), error_div) }
                 <div id="search-pane"><code>
