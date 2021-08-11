@@ -22,14 +22,27 @@ use void::Void;
 
 use reeves_types::*;
 
+const FUZZY_SEARCH_LIMIT: usize = 100;
+const MAX_RESULTS: usize = 500;
+
+const DB_NAME: &str = "reeves.db";
+const FN_ID_COUNTER: &str = "next_fn_id";
+const PARAM_TREE: &str = "param";
+const RET_TREE: &str = "ret";
+const FN_TREE: &str = "fn";
+
+// For fuzzy searching
+const PARAM_TYPES_INDEX: &str = "param_types";
+const RET_TYPES_INDEX: &str = "ret_types";
+
 fn stop_watch() -> StopWatch {
     StopWatch::start()
 }
 
 pub fn open_db() -> sled::Db {
-    let db = sled::open("reeves.db").unwrap();
-    if !db.contains_key("next_fn_id").unwrap() {
-        db.insert("next_fn_id", bincode::serialize(&0u64).unwrap()).unwrap();
+    let db = sled::open(DB_NAME).unwrap();
+    if !db.contains_key(FN_ID_COUNTER).unwrap() {
+        db.insert(FN_ID_COUNTER, bincode::serialize(&0u64).unwrap()).unwrap();
     }
     db
 }
@@ -104,16 +117,14 @@ pub fn analyze(path: &Path) -> (String, Vec<FnDetail>) {
     panic!("didn't find crate {} (import name {})!", krate_name, krate_import_name)
 }
 
-const FUZZY_SEARCH_LIMIT: usize = 20;
-
 pub fn search(db: &sled::Db, params_search: Option<Vec<String>>, ret_search: Option<String>) -> Vec<FnDetail> {
     let client = meili::client::Client::new("http://localhost:7700", "no_key");
-    let param_types_search = client.assume_index("param_types");
-    let ret_types_search = client.assume_index("ret_types");
+    let param_types_search = client.assume_index(PARAM_TYPES_INDEX);
+    let ret_types_search = client.assume_index(RET_TYPES_INDEX);
 
-    let param_tree = db.open_tree("param").unwrap();
-    let ret_tree = db.open_tree("ret").unwrap();
-    let fn_tree = db.open_tree("fn").unwrap();
+    let param_tree = db.open_tree(PARAM_TREE).unwrap();
+    let ret_tree = db.open_tree(RET_TREE).unwrap();
+    let fn_tree = db.open_tree(FN_TREE).unwrap();
 
     let mut candidate_types: Vec<(&sled::Tree, Vec<String>)> = vec![];
 
@@ -152,6 +163,7 @@ pub fn search(db: &sled::Db, params_search: Option<Vec<String>>, ret_search: Opt
     let max_candidate_depth = candidate_types.iter().map(|(_, ct)| ct.len()).max().unwrap_or(0);
     let mut fn_ids = vec![];
     let mut fn_ids_set = HashSet::new();
+    let mut ranges = vec![];
     for i in 1..max_candidate_depth {
         let mut iteration_fn_ids: Option<HashSet<u64>> = None;
         for (tree, ct_column) in candidate_types.iter() {
@@ -172,14 +184,19 @@ pub fn search(db: &sled::Db, params_search: Option<Vec<String>>, ret_search: Opt
 
         let ifnids = iteration_fn_ids.expect("unexpectedly ran out of fn ids");
         let new_fn_ids: Vec<_> = ifnids.difference(&fn_ids_set).cloned().collect();
+        ranges.push(fn_ids.len()..fn_ids.len()+new_fn_ids.len());
         fn_ids.extend_from_slice(&new_fn_ids);
         fn_ids_set.extend(new_fn_ids);
 
-        if fn_ids.len() >= 200 {
+        if fn_ids.len() >= MAX_RESULTS {
             break
         }
     }
-    let fn_ids = &fn_ids[..cmp::min(fn_ids.len(), 200)];
+    let end = cmp::min(fn_ids.len(), MAX_RESULTS);
+    let fn_ids = &fn_ids[..end];
+    if let Some(range) = ranges.pop() {
+        ranges.push(range.start..end)
+    }
 
     let mut ret = vec![];
     for fn_id in fn_ids {
@@ -188,8 +205,12 @@ pub fn search(db: &sled::Db, params_search: Option<Vec<String>>, ret_search: Opt
         ret.push(fndetail);
     }
 
-    // TODO: maybe sort within the chunks of iterations?
-    //ret.sort_by(|fd1, fd2| fd1.s.cmp(&fd2.s));
+    for range in ranges {
+        ret[range].sort_by(|fd1, fd2| {
+            let krate_cmp = fd1.krate.cmp(&fd2.krate);
+            if krate_cmp.is_eq() { fd1.s.cmp(&fd2.s) } else { krate_cmp }
+        });
+    }
 
     ret
 }
@@ -215,8 +236,8 @@ struct TypeInFnResult {
 }
 
 pub fn load_text_search(db: &sled::Db) {
-    let param_tree = db.open_tree("param").unwrap();
-    let ret_tree = db.open_tree("ret").unwrap();
+    let param_tree = db.open_tree(PARAM_TREE).unwrap();
+    let ret_tree = db.open_tree(RET_TREE).unwrap();
 
     fn tokenize_type(s: &str) -> String {
         let mut s = s
@@ -333,13 +354,13 @@ fn discover_crate_import_name(path: &Path, cargo_config: &CargoConfig) -> (Strin
 }
 
 fn add_crate(db: &sled::Db, name: &str, fndetails: Vec<FnDetail>) -> u64 {
-    let param_tree = db.open_tree("param").unwrap();
-    let ret_tree = db.open_tree("ret").unwrap();
-    let fn_tree = db.open_tree("fn").unwrap();
+    let param_tree = db.open_tree(PARAM_TREE).unwrap();
+    let ret_tree = db.open_tree(RET_TREE).unwrap();
+    let fn_tree = db.open_tree(FN_TREE).unwrap();
     let crate_tree = db.open_tree("crate").unwrap();
     let ret: Result<u64, TransactionError<Void>> = (&**db, &param_tree, &ret_tree, &fn_tree, &crate_tree)
         .transaction(|(db, param_tree, ret_tree, fn_tree, crate_tree)| {
-            let mut fn_id: u64 = bincode::deserialize(&db.get("next_fn_id").unwrap().unwrap()).unwrap();
+            let mut fn_id: u64 = bincode::deserialize(&db.get(FN_ID_COUNTER).unwrap().unwrap()).unwrap();
             let mut fn_ids = vec![];
             let nil_params: Vec<String> = vec!["<NOARGS>".into()];
             for fndetail in fndetails.iter() {
@@ -369,16 +390,16 @@ fn add_crate(db: &sled::Db, name: &str, fndetails: Vec<FnDetail>) -> u64 {
                 fn_id += 1
             }
             crate_tree.insert(name, bincode::serialize(&fn_ids).unwrap()).unwrap();
-            db.insert("next_fn_id", bincode::serialize(&fn_id).unwrap()).unwrap();
+            db.insert(FN_ID_COUNTER, bincode::serialize(&fn_id).unwrap()).unwrap();
             Ok(fn_id)
         });
     ret.unwrap()
 }
 
 fn purge_crate(db: &sled::Db, name: &str) {
-    let param_tree = db.open_tree("param").unwrap();
-    let ret_tree = db.open_tree("ret").unwrap();
-    let fn_tree = db.open_tree("fn").unwrap();
+    let param_tree = db.open_tree(PARAM_TREE).unwrap();
+    let ret_tree = db.open_tree(RET_TREE).unwrap();
+    let fn_tree = db.open_tree(FN_TREE).unwrap();
     let crate_tree = db.open_tree("crate").unwrap();
     let ret: Result<(), TransactionError<Void>> = (&**db, &param_tree, &ret_tree, &fn_tree, &crate_tree)
         .transaction(|(_db, param_tree, ret_tree, fn_tree, crate_tree)| {

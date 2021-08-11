@@ -19,7 +19,7 @@ if [ "$1" = build ]; then
         arg="$1"
         shift
     fi
-    if [ "$arg" = "" ]; then
+    if [ "$arg" = "" -o "$arg" = "debug" ]; then
         ./script.sh build binary
         ./script.sh build page --dev
     elif [ "$arg" = "release" ]; then
@@ -86,8 +86,12 @@ elif [ "$1" = prep-container ]; then
 
 elif [ "$1" = srv ]; then
     shift
-    ./script.sh build
-    RUST_LOG=$RUST_LOG ./target/debug/server serve 127.0.0.1 8000
+    arg=debug
+    if [ "$#" -ge 1 ]; then
+        arg="$1"
+    fi
+    ./script.sh build $arg
+    RUST_LOG=$RUST_LOG ./target/$arg/server serve 127.0.0.1 8000
 
 elif [ "$1" = vim ]; then
     vim -p notes script.sh Cargo.toml src/main.rs src/lib.rs reeves-types/src/lib.rs page/src/lib.rs page/Cargo.toml src/bin/server.rs
