@@ -187,9 +187,7 @@ pub fn load_text_search(db: &sled::Db) {
     let client = meili::client::Client::new("http://localhost:7700", "no_key");
 
     futures::executor::block_on(async move {
-        client.delete_index_if_exists("param_types").await.unwrap();
-        let param_types = client.get_or_create("param_types").await.unwrap();
-        param_types.set_settings(&meili::settings::Settings {
+        let settings = meili::settings::Settings {
             synonyms: None,
             stop_words: Some(vec![]),
             ranking_rules: None,
@@ -197,7 +195,13 @@ pub fn load_text_search(db: &sled::Db) {
             distinct_attribute: None,
             searchable_attributes: Some(vec!["ty".into()]),
             displayed_attributes: Some(vec!["orig_ty".into()]),
-        }).await.unwrap().wait_for_pending_update(None, None).await.unwrap().unwrap();
+        };
+        client.delete_index_if_exists("param_types").await.unwrap();
+        let param_types = client.get_or_create("param_types").await.unwrap();
+        param_types.set_settings(&settings).await.unwrap().wait_for_pending_update(None, None).await.unwrap().unwrap();
+        client.delete_index_if_exists("ret_types").await.unwrap();
+        let ret_types = client.get_or_create("ret_types").await.unwrap();
+        ret_types.set_settings(&settings).await.unwrap().wait_for_pending_update(None, None).await.unwrap().unwrap();
 
         async fn do_batch(index: &meili::indexes::Index, batch: &mut Vec<TypeInFn>, total: &mut usize) {
             index.add_documents(batch, Some("id")).await.unwrap()
@@ -214,11 +218,24 @@ pub fn load_text_search(db: &sled::Db) {
             let str_key = str::from_utf8(&key).unwrap();
             let tokenized_key = tokenize_type(str_key);
             batch.push(TypeInFn { id: i as u64, ty: tokenized_key, orig_ty: str_key.to_owned() });
-            if batch.len() > 500 {
+            if batch.len() >= 500 {
                 do_batch(&param_types, &mut batch, &mut total).await;
             }
         }
         do_batch(&param_types, &mut batch, &mut total).await;
+
+        let mut total = 0;
+        let mut batch = vec![];
+        for (i, kv) in ret_tree.iter().enumerate() {
+            let (key, _val) = kv.unwrap();
+            let str_key = str::from_utf8(&key).unwrap();
+            let tokenized_key = tokenize_type(str_key);
+            batch.push(TypeInFn { id: i as u64, ty: tokenized_key, orig_ty: str_key.to_owned() });
+            if batch.len() >= 500 {
+                do_batch(&ret_types, &mut batch, &mut total).await;
+            }
+        }
+        do_batch(&ret_types, &mut batch, &mut total).await;
     })
 }
 
