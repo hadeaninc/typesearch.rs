@@ -7,6 +7,8 @@ use std::path::Path;
 use std::process::Command;
 
 fn main() {
+    env_logger::init();
+
     let args: Vec<_> = env::args().collect();
     if args[1] != "x" {
         // We need this because some parts of RA can execute themselves

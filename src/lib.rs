@@ -9,10 +9,12 @@ use profile::StopWatch;
 use project_model::CargoConfig;
 use rust_analyzer::cli::load_cargo::{LoadCargoConfig, load_workspace_at};
 
+use log::{trace, debug, info};
 use meilisearch_sdk as meili;
 use serde::{Serialize, Deserialize};
 use sled::Transactional;
 use sled::transaction::TransactionError;
+use std::cmp;
 use std::collections::HashSet;
 use std::path::Path;
 use std::str;
@@ -34,10 +36,10 @@ pub fn open_db() -> sled::Db {
 
 pub fn analyze_and_save(db: &sled::Db, path: &Path) {
     let (ref krate_name, fndetails) = analyze(path);
-    eprintln!("finished printing functions, inserting {} function details into db", fndetails.len());
+    info!("finished printing functions, inserting {} function details into db", fndetails.len());
     purge_crate(db, krate_name);
     add_crate(db, krate_name, fndetails);
-    eprintln!("finished inserting into db");
+    info!("finished inserting into db");
 }
 
 pub fn analyze(path: &Path) -> (String, Vec<FnDetail>) {
@@ -45,7 +47,7 @@ pub fn analyze(path: &Path) -> (String, Vec<FnDetail>) {
     if !path.is_dir() {
         panic!("path is not a directory")
     }
-    eprintln!("loading workspace at path: {}", path.display());
+    info!("loading workspace at path: {}", path.display());
     let mut cargo_config = CargoConfig::default();
     cargo_config.no_sysroot = false;
     let load_cargo_config = LoadCargoConfig {
@@ -56,7 +58,7 @@ pub fn analyze(path: &Path) -> (String, Vec<FnDetail>) {
     let (host, _vfs, _proc_macro) =
         load_workspace_at(&path, &cargo_config, &load_cargo_config, &|_| {}).unwrap();
     let rootdb = host.raw_database();
-    eprintln!("{:<20} {}", "Database loaded:", db_load_sw.elapsed());
+    info!("{:<20} {}", "Database loaded:", db_load_sw.elapsed());
 
     let hirdb: &dyn HirDatabase = rootdb.upcast();
     let defdb: &dyn DefDatabase = rootdb.upcast();
@@ -69,12 +71,13 @@ pub fn analyze(path: &Path) -> (String, Vec<FnDetail>) {
         if krate_import_name != display_name {
             continue
         }
-        eprintln!("found crate: {:?} (import name {})", krate_name, display_name);
+        info!("found crate: {:?} (import name {})", krate_name, display_name);
         let mut moddefs = HashSet::new();
         let import_map = defdb.import_map(krate.into());
         let mut fndetails = vec![];
         for (item, importinfo) in import_map.map.iter() {
             let item: ItemInNs = item.to_owned().into();
+            // skip macros
             let moddef = if let Some(moddef) = item.as_module_def() { moddef } else { continue };
             let isnew = moddefs.insert(moddef);
             if !isnew { continue }
@@ -89,32 +92,41 @@ pub fn analyze(path: &Path) -> (String, Vec<FnDetail>) {
                 x @ ModuleDef::Module(_) |
                 x @ ModuleDef::TypeAlias(_) |
                 x @ ModuleDef::BuiltinType(_) => {
-                    eprintln!("skipping ty {:?} {:?}", x.name(hirdb), x);
+                    trace!("skipping non-function {:?} {:?}", x.name(hirdb), x);
                     vec![]
                 },
             };
+            trace!("adding {} items", import_fndetails.len());
             fndetails.extend(import_fndetails);
-            eprintln!("");
         }
         return (krate_name, fndetails)
     }
     panic!("didn't find crate {} (import name {})!", krate_name, krate_import_name)
 }
 
+const FUZZY_SEARCH_LIMIT: usize = 20;
+
 pub fn search(db: &sled::Db, params_search: Option<Vec<String>>, ret_search: Option<String>) -> Vec<FnDetail> {
+    let client = meili::client::Client::new("http://localhost:7700", "no_key");
+    let param_types_search = client.assume_index("param_types");
+    let ret_types_search = client.assume_index("ret_types");
+
     let param_tree = db.open_tree("param").unwrap();
     let ret_tree = db.open_tree("ret").unwrap();
     let fn_tree = db.open_tree("fn").unwrap();
 
-    if params_search.is_none() && ret_search.is_none() {
-        return vec![]
-    }
-
-    let mut match_fns: Option<HashSet<u64>> = None;
+    let mut candidate_types: Vec<(&sled::Tree, Vec<String>)> = vec![];
 
     if let Some(ret_search) = ret_search {
-        match_fns = Some(ret_tree.get(ret_search).unwrap()
-            .map(|ivec| bincode::deserialize(&ivec).unwrap()).unwrap_or_else(HashSet::new))
+        let ret_candidates = futures::executor::block_on(async {
+            ret_types_search.search()
+                .with_query(&ret_search)
+                .with_limit(FUZZY_SEARCH_LIMIT)
+                .execute::<TypeInFnResult>()
+                .await
+                .unwrap()
+        });
+        candidate_types.push((&ret_tree, ret_candidates.hits.into_iter().map(|c| c.result.orig_ty).collect()));
     }
 
     if let Some(mut params_search) = params_search {
@@ -122,28 +134,62 @@ pub fn search(db: &sled::Db, params_search: Option<Vec<String>>, ret_search: Opt
             params_search = vec!["<NOARGS>".into()];
         }
         for param in params_search {
-            let match_fns_param: HashSet<u64> = param_tree.get(param).unwrap()
-                .map(|ivec| bincode::deserialize(&ivec).unwrap()).unwrap_or_else(HashSet::new);
-            let new_match_fns = if let Some(match_fns) = match_fns.take() {
-                match_fns.intersection(&match_fns_param).cloned().collect()
-            } else {
-                match_fns_param
-            };
-            if new_match_fns.is_empty() {
-                return vec![]
-            }
-            match_fns = Some(new_match_fns)
+            let param_candidates = futures::executor::block_on(async {
+                param_types_search.search()
+                    .with_query(&param)
+                    .with_limit(FUZZY_SEARCH_LIMIT)
+                    .execute::<TypeInFnResult>()
+                    .await
+                    .unwrap()
+            });
+            candidate_types.push((&param_tree, param_candidates.hits.into_iter().map(|c| c.result.orig_ty).collect()));
         }
     }
 
+    // TODO: at each pass, reorder to have the most restrictive type candidates first
+    // TODO: at each pass, remember the sets we've built so far so we don't recreate and keep
+    // removing the fn ids that have been selected
+    let max_candidate_depth = candidate_types.iter().map(|(_, ct)| ct.len()).max().unwrap_or(0);
+    let mut fn_ids = vec![];
+    let mut fn_ids_set = HashSet::new();
+    for i in 1..max_candidate_depth {
+        let mut iteration_fn_ids: Option<HashSet<u64>> = None;
+        for (tree, ct_column) in candidate_types.iter() {
+            let mut ct_column_fn_ids = HashSet::new();
+            for ct in &ct_column[..cmp::min(i, ct_column.len())] {
+                let match_fns: HashSet<u64> = tree.get(ct).unwrap()
+                    .map(|ivec| bincode::deserialize(&ivec).unwrap())
+                    .expect("candidate type did not already have an entry in db");
+                ct_column_fn_ids.extend(match_fns)
+            }
+            // Update the fn ids for this iteration, or initialise them (if the first column)
+            if let Some(ifnids) = iteration_fn_ids.as_mut() {
+                *ifnids = ifnids.intersection(&ct_column_fn_ids).cloned().collect()
+            } else {
+                iteration_fn_ids = Some(ct_column_fn_ids)
+            }
+        }
+
+        let ifnids = iteration_fn_ids.expect("unexpectedly ran out of fn ids");
+        let new_fn_ids: Vec<_> = ifnids.difference(&fn_ids_set).cloned().collect();
+        fn_ids.extend_from_slice(&new_fn_ids);
+        fn_ids_set.extend(new_fn_ids);
+
+        if fn_ids.len() >= 200 {
+            break
+        }
+    }
+    let fn_ids = &fn_ids[..cmp::min(fn_ids.len(), 200)];
+
     let mut ret = vec![];
-    for fn_id in match_fns.expect("no match fns, but should have been caught earlier") {
+    for fn_id in fn_ids {
         let fn_bytes = fn_tree.get(bincode::serialize(&fn_id).unwrap()).unwrap().unwrap();
         let fndetail: FnDetail = bincode::deserialize(&fn_bytes).unwrap();
         ret.push(fndetail);
     }
 
-    ret.sort_by(|fd1, fd2| fd1.s.cmp(&fd2.s));
+    // TODO: maybe sort within the chunks of iterations?
+    //ret.sort_by(|fd1, fd2| fd1.s.cmp(&fd2.s));
 
     ret
 }
@@ -163,10 +209,14 @@ impl meili::document::Document for TypeInFn {
     }
 }
 
+#[derive(Serialize, Deserialize)]
+struct TypeInFnResult {
+    orig_ty: String,
+}
+
 pub fn load_text_search(db: &sled::Db) {
     let param_tree = db.open_tree("param").unwrap();
     let ret_tree = db.open_tree("ret").unwrap();
-    let fn_tree = db.open_tree("fn").unwrap();
 
     fn tokenize_type(s: &str) -> String {
         let mut s = s
@@ -207,7 +257,7 @@ pub fn load_text_search(db: &sled::Db) {
             index.add_documents(batch, Some("id")).await.unwrap()
                 .wait_for_pending_update(None, None).await.unwrap().unwrap();
             *total += batch.len();
-            eprintln!("Added {} entries in total", total);
+            info!("Added {} entries in total", total);
             batch.clear();
         }
 
@@ -248,12 +298,12 @@ pub fn debugdb(db: &sled::Db) {
             } else {
                 format!("{:?}", val)
             };
-            eprintln!("key: {:?} | {:?} -> {}", String::from_utf8_lossy(&key), key, short_val_str)
+            info!("key: {:?} | {:?} -> {}", String::from_utf8_lossy(&key), key, short_val_str)
         }
     }
 
     for treename in db.tree_names() {
-        eprintln!("# tree: {:?}", String::from_utf8_lossy(&treename));
+        info!("# tree: {:?}", String::from_utf8_lossy(&treename));
         let tree = db.open_tree(&treename).unwrap();
         debugtree(&tree);
     }
@@ -271,17 +321,14 @@ fn discover_crate_import_name(path: &Path, cargo_config: &CargoConfig) -> (Strin
     let p: &_ = path.try_into().unwrap();
     let root = ProjectManifest::discover_single(&p).unwrap();
     let ws = ProjectWorkspace::load(root, cargo_config, &|_| {}).unwrap();
-    //eprintln!("{:#?}", ws);
     let cargo = match ws {
         ProjectWorkspace::Cargo { cargo, .. } => cargo,
         _ => panic!("unexpected workspace type"),
     };
-    //eprintln!("{:#?}", cargo);
     let members = cargo.packages().map(|pd| &cargo[pd]).filter(|pd| pd.is_member).collect::<Vec<_>>();
     assert_eq!(members.len(), 1, "{:?}", members);
     let lib_targets = members[0].targets.iter().map(|&t| &cargo[t]).filter(|t| t.kind == TargetKind::Lib).collect::<Vec<_>>();
     assert_eq!(lib_targets.len(), 1, "{:?}", lib_targets);
-    //eprintln!("{:?} {:?}", members[0].name, lib_targets[0].name);
     (members[0].name.clone(), lib_targets[0].name.replace('-', "_"))
 }
 
@@ -317,7 +364,7 @@ fn add_crate(db: &sled::Db, name: &str, fndetails: Vec<FnDetail>) -> u64 {
                 fn_tree.insert(bincode::serialize(&fn_id).unwrap(), bincode::serialize(fndetail).unwrap()).unwrap();
                 fn_ids.push(fn_id);
 
-                eprintln!("inserted: {}", fndetail.s);
+                debug!("inserted fndetail: {}", fndetail.s);
 
                 fn_id += 1
             }
@@ -368,18 +415,20 @@ fn purge_crate(db: &sled::Db, name: &str) {
 }
 
 fn analyze_function(hirdb: &dyn HirDatabase, krate_name: &str, function: hir::Function, path: &str) -> Vec<FnDetail> {
-    let self_param_pretty = function.self_param(hirdb)
-        .map(|param| param.display(hirdb).to_string());
     let assoc_params_pretty = function.assoc_fn_params(hirdb)
         .into_iter().map(|param| param.ty().display(hirdb).to_string())
         .collect::<Vec<_>>();
-    let params_pretty = function.method_params(hirdb).map(|params| {
-        params.into_iter().map(|param| param.ty().display(hirdb).to_string())
-            .collect::<Vec<_>>()
-    });
     let ret_pretty = function.ret_type(hirdb).display(hirdb).to_string();
-    eprintln!("fn {} ({:?} | {:?} | {:?} | {})", path,
-        self_param_pretty, assoc_params_pretty, params_pretty, ret_pretty);
+    if log::log_enabled!(log::Level::Info) {
+        let self_param_pretty = function.self_param(hirdb)
+            .map(|param| param.display(hirdb).to_string());
+        let params_pretty = function.method_params(hirdb).map(|params| {
+            params.into_iter().map(|param| param.ty().display(hirdb).to_string())
+                .collect::<Vec<_>>()
+        });
+        trace!("fn {} ({:?} | {:?} | {:?} | {})", path,
+            self_param_pretty, assoc_params_pretty, params_pretty, ret_pretty);
+    }
     let assoc_params_str = assoc_params_pretty.join(", ");
     let s = format!("fn {}({}) -> {}", path, assoc_params_str, ret_pretty);
     vec![FnDetail {
@@ -404,7 +453,7 @@ fn analyze_adt(hirdb: &dyn HirDatabase, krate_name: &str, adt: hir::Adt, path: &
     });
     let methods: Vec<_> = methods.into_iter()
         .filter(|m| m.visibility(hirdb) == Visibility::Public).collect();
-    eprintln!("adt {} {:?}", path, methods);
+    trace!("adt {} {:?}", path, methods);
     let mut fndetails = vec![];
     for method in methods {
         fndetails.extend(analyze_function(hirdb, krate_name, method, &(path.to_owned() + "::" + &method.name(hirdb).to_string())));
@@ -413,6 +462,6 @@ fn analyze_adt(hirdb: &dyn HirDatabase, krate_name: &str, adt: hir::Adt, path: &
 }
 
 fn analyze_trait(hirdb: &dyn HirDatabase, _krate_name: &str, tr: hir::Trait, path: &str) -> Vec<FnDetail> {
-    eprintln!("trait {} {:?}", path, tr.items(hirdb));
+    trace!("trait {} {:?}", path, tr.items(hirdb));
     vec![]
 }

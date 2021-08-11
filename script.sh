@@ -60,10 +60,18 @@ elif [ "$1" = run ]; then
     shift
     RUST_LOG=$RUST_LOG ./target/debug/reeves "$@"
 
+elif [ "$1" = analyze ]; then
+    shift
+    RUST_LOG=$RUST_LOG ./target/debug/reeves x analyze "$@"
+
 elif [ "$1" = prep-container ]; then
     shift
+    ./script.sh build release
+    (cd rust-analyzer && cargo build --release)
     rm -rf container-state
     mkdir container-state
+    cp target/release/reeves container-state/
+    cp rust-analyzer/target/release/rust-analyzer container-state/
     cd container-state
     export RUSTUP_HOME=$(pwd)/rustup
     export CARGO_HOME=$(pwd)/cargo
