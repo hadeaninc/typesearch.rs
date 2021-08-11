@@ -47,8 +47,13 @@ fn main() {
         for fndetail in fndetails {
             println!("res: {}", fndetail.s)
         }
+    } else if args[2] == "load-text-search" {
+        let db = reeves::open_db();
+        reeves::load_text_search(&db)
     } else if args[2] == "debugdb" {
         let db = reeves::open_db();
         reeves::debugdb(&db)
+    } else {
+        panic!("unknown command")
     }
 }
