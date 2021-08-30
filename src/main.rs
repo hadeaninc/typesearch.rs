@@ -1,7 +1,7 @@
 use reeves;
 
 use isahc::prelude::*;
-use log::{trace, debug, info};
+use log::{debug, info};
 use rayon::prelude::*;
 use serde::Deserialize;
 use std::cmp;
@@ -11,124 +11,164 @@ use std::io::{self, Write};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use structopt::StructOpt;
 
 use reeves_types::*;
 
+// We re-exec this in a container, so need to know how to invoke it
 const ANALYZE_AND_PRINT_COMMAND: &str = "analyze-and-print";
 
-fn criner_db_path_from_env() -> PathBuf {
-    env::var_os("REEVES_CRINER_DB").unwrap().into()
+const ENV_RUST_ANALYZER_BINARY: &str = "REEVES_RUST_ANALYZER_BINARY";
+// NOTE: this variable assumes that reeves never re-executes itself in the
+// same environment (inside a container is fine, as the environment isn't shared)
+// We need this because some parts of RA can execute themselves, but we use
+// it as a library, so to differentiate whether we're starting reeves or rust
+// analyzer, we set this variable on reeves startup
+const ENV_RUST_ANALYZER_EXEC: &str = "REEVES_INTERNAL_RUST_ANALYZER_EXEC";
+
+#[derive(Debug, StructOpt)]
+#[structopt(name = "reeves", about = "A tool for indexing and searching crates")]
+struct ReevesOpt {
+    #[structopt(default_value = "reeves.db")]
+    db: PathBuf,
+    #[structopt(default_value = "criner/criner.db")]
+    criner_db: PathBuf,
+    #[structopt(subcommand)]
+    cmd: ReevesCmd,
+}
+
+#[derive(Debug, StructOpt)]
+enum ReevesCmd {
+    AnalyzeAndSave {
+        crate_path: PathBuf,
+    },
+    #[structopt(name = ANALYZE_AND_PRINT_COMMAND)]
+    AnalyzeAndPrint {
+        crate_path: PathBuf,
+    },
+    ContainerAnalyzeAndPrint {
+        crate_path: PathBuf,
+    },
+    AnalyzeTop100Crates,
+    Search {
+        params_search: String,
+        ret_search: String,
+    },
+    LoadTextSearch,
+    DebugDB,
 }
 
 fn main() {
     env_logger::init();
 
-    let args: Vec<_> = env::args().collect();
-    if args[1] != "x" {
-        // We need this because some parts of RA can execute themselves
-        let mut cmd = match env::var_os("RUST_ANALYZER_BINARY") {
+    // See comment on ENV_RUST_ANALYZER_EXEC
+    if env::var_os(ENV_RUST_ANALYZER_EXEC).is_some() {
+        debug!("Re-executing rust-analyzer");
+        let mut cmd = match env::var_os(ENV_RUST_ANALYZER_BINARY) {
             Some(v) => Command::new(v),
             None => Command::new("./rust-analyzer/target/release/rust-analyzer"),
         };
         cmd.args(env::args_os().skip(1)).exec();
         panic!("did not exec");
+    } else {
+        env::set_var(ENV_RUST_ANALYZER_EXEC, "1");
     }
 
-    if args[2] == "analyze-and-save" {
-        let path: &Path = args[3].as_ref();
+    let opt = ReevesOpt::from_args();
+    match opt.cmd {
 
-        let (ref krate_name, fndetails) = reeves::analyze_crate_path(path);
-        info!("finished analysing functions, inserting {} function details into db", fndetails.len());
-        let db = reeves::open_db();
-        reeves::save_analysis(&db, krate_name, fndetails);
-        info!("finished inserting into db");
-
-    } else if args[2] == ANALYZE_AND_PRINT_COMMAND {
-        let path: &Path = args[3].as_ref();
-
-        let (krate_name, fndetails) = reeves::analyze_crate_path(path);
-        let out = serde_json::to_vec(&(krate_name, fndetails)).unwrap();
-        io::stdout().write_all(&out).unwrap();
-
-    } else if args[2] == "container-analyze-and-print" {
-        let path: &Path = args[3].as_ref();
-
-        let (krate_name, fndetails) = container_analyze_crate_path(path);
-        let out = serde_json::to_vec(&(krate_name, fndetails)).unwrap();
-        io::stdout().write_all(&out).unwrap();
-
-    } else if args[2] == "analyze-top100-crates" {
-        let criner_db_path = criner_db_path_from_env();
-
-        #[derive(Deserialize)]
-        struct PlayCrates {
-            crates: Vec<PlayCrate>,
-        }
-        #[derive(Deserialize)]
-        struct PlayCrate {
-            name: String,
-            version: String,
-            #[allow(unused)]
-            id: String, // the alias play uses
-        }
-        let mut res = isahc::get("https://play.rust-lang.org/meta/crates").unwrap();
-        let crates: PlayCrates = res.json().unwrap();
-
-        let db = reeves::open_db();
-
-        let total_crates = crates.crates.len();
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        let progress = AtomicUsize::new(0);
-        fs::create_dir_all("/tmp/crate").unwrap();
-        crates.crates.par_iter().for_each(|krate| {
-            info!("analyzing crate {}-{}", krate.name, krate.version);
-            let crate_tar_path = crate_to_tar_path(criner_db_path.as_ref(), &krate.name, &krate.version);
-            let crate_tar_path = crate_tar_path.to_str().unwrap();
-            let res = Command::new("tar")
-                .args(&["-C", "/tmp/crate", "-xzf", crate_tar_path])
-                .status().unwrap();
-            if !res.success() {
-                panic!("failed to create extracted crate")
-            }
-
-            let crate_path = format!("/tmp/crate/{}-{}", krate.name, krate.version);
-            let (ref krate_name, fndetails) = container_analyze_crate_path(crate_path.as_ref());
-            info!("finished analysing functions for {}, inserting {} function details into db", krate_name, fndetails.len());
+        ReevesCmd::AnalyzeAndSave { crate_path } => {
+            let (ref krate_name, fndetails) = reeves::analyze_crate_path(&crate_path);
+            info!("finished analysing functions, inserting {} function details into db", fndetails.len());
+            let db = reeves::open_db(&opt.db);
             reeves::save_analysis(&db, krate_name, fndetails);
-            fs::remove_dir_all(crate_path).unwrap();
-            let current_progress = progress.fetch_add(1, Ordering::SeqCst)+1;
-            info!("finished inserting into db for {}, completed {}/{} crates", krate_name, current_progress, total_crates);
-        });
+            info!("finished inserting into db");
+        },
 
-    } else if args[2] == "search" {
-        let params_search = &args[3];
-        let params_search: Vec<_> = if params_search.is_empty() {
-            vec![]
-        } else {
-            params_search.split(",").map(|s| s.trim().to_owned()).collect()
-        };
-        let ret_search = &args[4];
-        let ret_search = if ret_search.is_empty() {
-            None
-        } else {
-            Some(ret_search.to_owned())
-        };
-        let db = reeves::open_db();
-        let fndetails = reeves::search(&db, Some(params_search), ret_search);
-        for fndetail in fndetails {
-            println!("res: {}", fndetail.s)
+        ReevesCmd::AnalyzeAndPrint { crate_path } => {
+            let (krate_name, fndetails) = reeves::analyze_crate_path(&crate_path);
+            let out = serde_json::to_vec(&(krate_name, fndetails)).unwrap();
+            io::stdout().write_all(&out).unwrap();
+        },
+
+        ReevesCmd::ContainerAnalyzeAndPrint { crate_path } => {
+            let (krate_name, fndetails) = container_analyze_crate_path(&crate_path);
+            let out = serde_json::to_vec(&(krate_name, fndetails)).unwrap();
+            io::stdout().write_all(&out).unwrap();
+        },
+
+        ReevesCmd::AnalyzeTop100Crates => {
+            let criner_db_path = &opt.criner_db;
+
+            #[derive(Deserialize)]
+            struct PlayCrates {
+                crates: Vec<PlayCrate>,
+            }
+            #[derive(Deserialize)]
+            struct PlayCrate {
+                name: String,
+                version: String,
+                #[allow(unused)]
+                id: String, // the alias play uses
+            }
+            let mut res = isahc::get("https://play.rust-lang.org/meta/crates").unwrap();
+            let crates: PlayCrates = res.json().unwrap();
+
+            let db = reeves::open_db(&opt.db);
+
+            let total_crates = crates.crates.len();
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            let progress = AtomicUsize::new(0);
+            fs::create_dir_all("/tmp/crate").unwrap();
+            crates.crates.par_iter().for_each(|krate| {
+                info!("analyzing crate {}-{}", krate.name, krate.version);
+                let crate_tar_path = crate_to_tar_path(criner_db_path.as_ref(), &krate.name, &krate.version);
+                let crate_tar_path = crate_tar_path.to_str().unwrap();
+                let res = Command::new("tar")
+                    .args(&["-C", "/tmp/crate", "-xzf", crate_tar_path])
+                    .status().unwrap();
+                if !res.success() {
+                    panic!("failed to create extracted crate")
+                }
+
+                let crate_path = format!("/tmp/crate/{}-{}", krate.name, krate.version);
+                let (ref krate_name, fndetails) = container_analyze_crate_path(crate_path.as_ref());
+                info!("finished analysing functions for {}, inserting {} function details into db", krate_name, fndetails.len());
+                reeves::save_analysis(&db, krate_name, fndetails);
+                fs::remove_dir_all(crate_path).unwrap();
+                let current_progress = progress.fetch_add(1, Ordering::SeqCst)+1;
+                info!("finished inserting into db for {}, completed {}/{} crates", krate_name, current_progress, total_crates);
+            });
         }
 
-    } else if args[2] == "load-text-search" {
-        let db = reeves::open_db();
-        reeves::load_text_search(&db)
+        ReevesCmd::Search { params_search, ret_search } => {
+            let params_search: Vec<_> = if params_search.is_empty() {
+                vec![]
+            } else {
+                params_search.split(",").map(|s| s.trim().to_owned()).collect()
+            };
+            let ret_search = if ret_search.is_empty() {
+                None
+            } else {
+                Some(ret_search.to_owned())
+            };
+            let db = reeves::open_db(&opt.db);
+            let fndetails = reeves::search(&db, Some(params_search), ret_search);
+            for fndetail in fndetails {
+                println!("res: {}", fndetail.s)
+            }
+        }
 
-    } else if args[2] == "debugdb" {
-        let db = reeves::open_db();
-        reeves::debugdb(&db)
+        ReevesCmd::LoadTextSearch => {
+            let db = reeves::open_db(&opt.db);
+            reeves::load_text_search(&db)
+        },
 
-    } else {
-        panic!("unknown command")
+        ReevesCmd::DebugDB => {
+            let db = reeves::open_db(&opt.db);
+            reeves::debugdb(&db)
+        }
+
     }
 }
 

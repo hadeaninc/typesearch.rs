@@ -120,7 +120,7 @@ pub fn servemain(args: &[&str]) {
 
     assert!(args.len() == 2 || args.len() == 1);
 
-    let db = reeves::open_db();
+    let db = reeves::open_db("reeves.db".as_ref());
 
     let addr = if args.len() == 1 {
         let port = args[0];

@@ -10,7 +10,6 @@ export REEVES_CONFIG="$(pwd)/reeves_config.toml"
 export RUST_BACKTRACE=1
 
 export REEVES_STATIC_TAR_PATH=page/pkg.tar
-export REEVES_CRINER_DB=$(pwd)/criner/criner.db
 
 if [ "$1" = build ]; then
     shift

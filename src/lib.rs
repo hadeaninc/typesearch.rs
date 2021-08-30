@@ -25,7 +25,6 @@ use reeves_types::*;
 const FUZZY_SEARCH_LIMIT: usize = 100;
 const MAX_RESULTS: usize = 500;
 
-const DB_NAME: &str = "reeves.db";
 const FN_ID_COUNTER: &str = "next_fn_id";
 const PARAM_TREE: &str = "param";
 const RET_TREE: &str = "ret";
@@ -39,8 +38,8 @@ fn stop_watch() -> StopWatch {
     StopWatch::start()
 }
 
-pub fn open_db() -> sled::Db {
-    let db = sled::open(DB_NAME).unwrap();
+pub fn open_db(path: &Path) -> sled::Db {
+    let db = sled::open(path).unwrap();
     if !db.contains_key(FN_ID_COUNTER).unwrap() {
         db.insert(FN_ID_COUNTER, bincode::serialize(&0u64).unwrap()).unwrap();
     }
