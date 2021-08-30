@@ -119,6 +119,17 @@ code {
     padding: 2px;
 }
 
+#hosted-by {
+    position: absolute;
+    right: 0;
+    bottom: 0;
+    padding: 0.5em;
+}
+
+#hosted-by img {
+    width: 2em;
+}
+
 #search-pane {
     font-size: 1.5em;
 }

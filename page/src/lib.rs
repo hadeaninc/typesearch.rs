@@ -230,11 +230,16 @@ impl Component for ReevesComponent {
         html!{ <>
             <div id="control-pane">
                 <div>
-                    <header>
-                        { "Reeves by Hadean" }<img src="https://avatars.githubusercontent.com/u/13240906?s=50&v=4"></img>
-                    </header>
+                    <header>{ "Reeves" }</header>
                     { "Currently searching all crates on the " }<a href="https://play.rust-lang.org">{ "Rust Playground" }</a>
                     { " (i.e. top 100 crates from " }<a href="https://crates.io">{ "crates.io" }</a>{ ")" }
+                </div>
+                <div id="hosted-by">
+                    { "Hosted by " }
+                    <a href="https://platform.hadean.com">
+                        { "Hadean" }
+                        <img src="https://avatars.githubusercontent.com/u/13240906?s=50&v=4"></img>
+                    </a>
                 </div>
                 <br />
                 { maybenode(self.last_error.as_ref().map(String::as_str), error_div) }
