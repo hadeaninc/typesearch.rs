@@ -307,7 +307,7 @@ pub fn load_text_search(db: &sled::Db) {
 }
 
 pub fn debugdb(db: &sled::Db) {
-    fn debugtree(tree: &sled::Tree) {
+    fn debugtree(name: &str, tree: &sled::Tree) {
         for kv in tree.iter() {
             let (key, val) = kv.unwrap();
             let short_val_str = if val.len() > 16 {
@@ -315,14 +315,15 @@ pub fn debugdb(db: &sled::Db) {
             } else {
                 format!("{:?}", val)
             };
-            info!("key: {:?} | {:?} -> {}", String::from_utf8_lossy(&key), key, short_val_str)
+            info!("tree: {}, key: ({:?} | {:?}) -> {}", name, String::from_utf8_lossy(&key), key, short_val_str)
         }
     }
 
     for treename in db.tree_names() {
-        info!("# tree: {:?}", String::from_utf8_lossy(&treename));
+        let namestr = str::from_utf8(&treename).unwrap();
+        info!("# tree: {:?}", namestr);
         let tree = db.open_tree(&treename).unwrap();
-        debugtree(&tree);
+        debugtree(namestr, &tree);
     }
 }
 
