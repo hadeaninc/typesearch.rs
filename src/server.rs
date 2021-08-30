@@ -1,14 +1,12 @@
-#[macro_use]
-extern crate log;
-
 use actix_web::{App, HttpResponse, HttpServer, Responder};
 use actix_web::http::header::{ContentEncoding, ContentType};
 use actix_web::middleware;
 use actix_web::web;
 use filesystem::{FakeFileSystem, FileSystem};
-use std::env;
+use log::{info, trace};
 use std::fs;
 use std::io::{self, BufReader, Read};
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -20,40 +18,39 @@ macro_rules! resp {
         return HttpResponse::$status().set(mime).body($resp)
     }}
 }
-macro_rules! resp_uncompressed {
-    ($status:ident, $mime:expr, $resp:expr) => {{
-        use actix_web::dev::BodyEncoding;
-        let mime: ContentType = $mime;
-        return HttpResponse::$status().set(mime).encoding(ContentEncoding::Identity).body($resp)
-    }}
-}
+//macro_rules! resp_uncompressed {
+//    ($status:ident, $mime:expr, $resp:expr) => {{
+//        use actix_web::dev::BodyEncoding;
+//        let mime: ContentType = $mime;
+//        return HttpResponse::$status().set(mime).encoding(ContentEncoding::Identity).body($resp)
+//    }}
+//}
 macro_rules! respbin {
     ($resp:expr) => {
         resp!(Ok, ContentType::octet_stream(), bincode::serialize($resp).unwrap())
     };
 }
-macro_rules! respbinerr {
-    ($status:ident, $msg:expr) => {{
-        let resp = ErrorResponse { err: $msg.to_string() };
-        resp!($status, mime!(Application/OctetStream), bincode::serialize(&resp).unwrap())
-    }};
-}
+//macro_rules! respbinerr {
+//    ($status:ident, $msg:expr) => {{
+//        let resp = ErrorResponse { err: $msg.to_string() };
+//        resp!($status, mime!(Application/OctetStream), bincode::serialize(&resp).unwrap())
+//    }};
+//}
 
-macro_rules! getbody {
-    ($req:expr) => {{
-        let mut bodybuf = vec![];
-        $req.body.by_ref().take(REQ_SIZE_CAP as u64).read_to_end(&mut bodybuf).unwrap();
-        if bodybuf.len() == REQ_SIZE_CAP {
-            respbinerr!(BadRequest, "request too large")
-        }
-
-        match bincode::deserialize(&bodybuf) {
-            Ok(r) => r,
-            Err(_) => respbinerr!(BadRequest, "invalid bincode"),
-        }
-    }};
-}
-
+//macro_rules! getbody {
+//    ($req:expr) => {{
+//        let mut bodybuf = vec![];
+//        $req.body.by_ref().take(REQ_SIZE_CAP as u64).read_to_end(&mut bodybuf).unwrap();
+//        if bodybuf.len() == REQ_SIZE_CAP {
+//            respbinerr!(BadRequest, "request too large")
+//        }
+//
+//        match bincode::deserialize(&bodybuf) {
+//            Ok(r) => r,
+//            Err(_) => respbinerr!(BadRequest, "invalid bincode"),
+//        }
+//    }};
+//}
 
 struct InnerData {
     db: sled::Db,
@@ -85,8 +82,8 @@ async fn srv_post_reeves_search(state: ServerData, body: web::Bytes) -> impl Res
     respbin!(&ret)
 }
 
-fn load_static() -> FakeFileSystem {
-    let rdr = BufReader::new(fs::File::open(env!("REEVES_STATIC_TAR_PATH")).unwrap());
+fn load_static(static_tar: &Path) -> FakeFileSystem {
+    let rdr = BufReader::new(fs::File::open(static_tar).unwrap());
     let ar = tar::Archive::new(rdr);
     archive_to_fake_filesystem(ar)
 }
@@ -115,25 +112,10 @@ fn archive_to_fake_filesystem(mut ar: tar::Archive<impl Read>) -> FakeFileSystem
 
 // Main control functions
 
-pub fn servemain(args: &[&str]) {
-    env_logger::init();
-
-    assert!(args.len() == 2 || args.len() == 1);
-
-    let db = reeves::open_db("reeves.db".as_ref());
-
-    let addr = if args.len() == 1 {
-        let port = args[0];
-        format!("0.0.0.0:{}", port)
-    } else {
-        let ip = args[0];
-        let port = args[1];
-        format!("{}:{}", ip, port)
-    };
-
+pub fn serve(db: sled::Db, addr: String, static_tar: PathBuf) {
     let state = MyServerData { s: Arc::new(InnerData::new(db)) };
 
-    let fake_fs = load_static();
+    let fake_fs = load_static(&static_tar);
 
     let app_factory = move || {
         let app = App::new();
@@ -170,15 +152,4 @@ pub fn servemain(args: &[&str]) {
             .run()
             .await
     }).unwrap()
-}
-
-fn main() {
-    let args: Vec<String> = env::args().collect();
-    let op = &*args[1];
-    let args = args[2..].iter().map(String::as_str).collect::<Vec<&str>>();
-    let args = args.as_slice();
-    match op {
-        "serve" => servemain(args),
-        _ => panic!(),
-    }
 }

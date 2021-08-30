@@ -15,6 +15,8 @@ use structopt::StructOpt;
 
 use reeves_types::*;
 
+mod server;
+
 // We re-exec this in a container, so need to know how to invoke it
 const ANALYZE_AND_PRINT_COMMAND: &str = "analyze-and-print";
 
@@ -57,13 +59,21 @@ enum ReevesCmd {
     },
     #[structopt(about = "Analyze top 100 crates from play.rust-lang.org in containers and save results (requires: container state, criner DB, reeves DB)")]
     AnalyzeTop100Crates,
-    #[structopt(about = "Perform a search for some comma-separated param types and a ret type (requires: reeves DB, loaded text search)")]
+    #[structopt(about = "Populate the text search backend, using the reeves DB (requires: reeves DB, running text search)")]
+    LoadTextSearch,
+    #[structopt(about = "Perform a search for some comma-separated param types and a ret type (requires: reeves DB, running+loaded text search)")]
     Search {
         params_search: String,
         ret_search: String,
     },
-    #[structopt(about = "Populate the text search backend, using the reeves DB (requires: reeves DB, running text search)")]
-    LoadTextSearch,
+    #[structopt(about = "Start the reeves server (requires: wasm built, reeves db, loaded+running text search)")]
+    Serve {
+        #[structopt(long, default_value = "page/pkg.tar")]
+        static_tar: PathBuf,
+        #[structopt(default_value = "127.0.0.1")]
+        ip: String,
+        port: String,
+    },
     #[structopt(about = "Dump contents of the reeves DB (requires: reeves DB)")]
     DebugDB,
 }
@@ -151,6 +161,11 @@ fn main() {
             });
         }
 
+        ReevesCmd::LoadTextSearch => {
+            let db = reeves::open_db(&opt.db);
+            reeves::load_text_search(&db)
+        },
+
         ReevesCmd::Search { params_search, ret_search } => {
             let params_search: Vec<_> = if params_search.is_empty() {
                 vec![]
@@ -169,9 +184,10 @@ fn main() {
             }
         }
 
-        ReevesCmd::LoadTextSearch => {
+        ReevesCmd::Serve { ip, port, static_tar } => {
             let db = reeves::open_db(&opt.db);
-            reeves::load_text_search(&db)
+            let addr = format!("{}:{}", ip, port);
+            server::serve(db, addr, static_tar)
         },
 
         ReevesCmd::DebugDB => {

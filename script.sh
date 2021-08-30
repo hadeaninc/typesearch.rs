@@ -6,10 +6,7 @@ set -o xtrace
 
 CARGO="cargo --color=always"
 RUST_LOG="warn,server=trace,reeves=trace,actix=info"
-export REEVES_CONFIG="$(pwd)/reeves_config.toml"
 export RUST_BACKTRACE=1
-
-export REEVES_STATIC_TAR_PATH=page/pkg.tar
 
 if [ "$1" = build ]; then
     shift
