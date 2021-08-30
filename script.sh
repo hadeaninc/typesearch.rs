@@ -91,26 +91,8 @@ registry = "http://localhost:8888/index"
         ubuntu:20.04 /work/cargo/bin/cargo install lazy_static || true
     echo "Ignore the error above if it just complains about 'there is nothing to install'"
 
-elif [ "$1" = crate-analysis ]; then
-    shift
-    cd container-state
-    export RUSTUP_HOME=$(pwd)/rustup
-    export CARGO_HOME=$(pwd)/cargo
-    export PATH=$PATH:$(pwd)/cargo/bin
-    cd ..
-    /usr/bin/time python3 containerrun.py
-
-elif [ "$1" = srv ]; then
-    shift
-    arg=debug
-    if [ "$#" -ge 1 ]; then
-        arg="$1"
-    fi
-    ./script.sh build $arg
-    RUST_LOG=$RUST_LOG ./target/$arg/server serve 0.0.0.0 8000
-
 elif [ "$1" = vim ]; then
-    vim -p notes script.sh Cargo.toml src/main.rs src/lib.rs reeves-types/src/lib.rs page/src/lib.rs page/Cargo.toml src/bin/server.rs
+    vim -p notes script.sh Cargo.toml src/main.rs src/lib.rs reeves-types/src/lib.rs page/src/lib.rs page/Cargo.toml src/server.rs
 
 else
     echo invalid command
