@@ -77,6 +77,41 @@ $ ./script.sh run-release serve --port 8000
 
 Visit it in your browser at `http://localhost:8000`!
 
+## Full command line help
+
+```
+reeves 0.1.0
+A tool for indexing and searching crates
+
+USAGE:
+    reeves [OPTIONS] <SUBCOMMAND>
+
+FLAGS:
+    -h, --help       Prints help information
+    -V, --version    Prints version information
+
+OPTIONS:
+        --criner-db <criner-db>             [default: criner/criner.db]
+        --db <db>                           [default: reeves.db]
+        --rust-analyzer <rust-analyzer>     [default: rust-analyzer/target/release/rust-analyzer]
+
+SUBCOMMANDS:
+    analyze-and-print              Analyze a crate and print JSON output (requires: rust analyzer)
+    analyze-and-save               Analyze a crate and save results (requires: rust analyzer)
+    analyze-top100-crates          Analyze top 100 crates from play.rust-lang.org in containers and save results
+                                   (requires: container state, criner DB, reeves DB)
+    container-analyze-and-print    Analyze a crate in a secure container and print JSON output (requires: container
+                                   state)
+    debug-db                       Dump contents of the reeves DB (requires: reeves DB)
+    help                           Prints this message or the help of the given subcommand(s)
+    load-text-search               Populate the text search backend, using the reeves DB (requires: reeves DB,
+                                   running text search)
+    search                         Perform a search for some comma-separated param types and a ret type (requires:
+                                   reeves DB, running+loaded text search)
+    serve                          Start the reeves server (requires: wasm built, reeves db, loaded+running text
+                                   search)
+```
+
 ## TODO
 
  - Move from sled to sqlite to support multiprocess access
