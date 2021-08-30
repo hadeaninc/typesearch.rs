@@ -47,18 +47,24 @@ enum ReevesCmd {
         crate_path: PathBuf,
     },
     #[structopt(name = ANALYZE_AND_PRINT_COMMAND)]
+    #[structopt(about = "Analyze a crate and print JSON output (requires: rust analyzer)")]
     AnalyzeAndPrint {
         crate_path: PathBuf,
     },
+    #[structopt(about = "Analyze a crate in a secure container and print JSON output (requires: container state)")]
     ContainerAnalyzeAndPrint {
         crate_path: PathBuf,
     },
+    #[structopt(about = "Analyze top 100 crates from play.rust-lang.org in containers and save results (requires: container state, criner DB, reeves DB)")]
     AnalyzeTop100Crates,
+    #[structopt(about = "Perform a search for some comma-separated param types and a ret type (requires: reeves DB, loaded text search)")]
     Search {
         params_search: String,
         ret_search: String,
     },
+    #[structopt(about = "Populate the text search backend, using the reeves DB (requires: reeves DB, running text search)")]
     LoadTextSearch,
+    #[structopt(about = "Dump contents of the reeves DB (requires: reeves DB)")]
     DebugDB,
 }
 
