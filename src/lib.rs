@@ -52,7 +52,7 @@ pub fn save_analysis(db: &sled::Db, krate_name: &str, fndetails: Vec<FnDetail>) 
     add_crate(db, krate_name, fndetails);
 }
 
-pub fn analyze(path: &Path) -> (String, Vec<FnDetail>) {
+pub fn analyze_crate_path(path: &Path) -> (String, Vec<FnDetail>) {
     let mut db_load_sw = stop_watch();
     if !path.is_dir() {
         panic!("path is not a directory")

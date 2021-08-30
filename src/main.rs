@@ -37,7 +37,7 @@ fn main() {
     if args[2] == "analyze-and-save" {
         let path: &Path = args[3].as_ref();
 
-        let (ref krate_name, fndetails) = reeves::analyze(path);
+        let (ref krate_name, fndetails) = reeves::analyze_crate_path(path);
         info!("finished analysing functions, inserting {} function details into db", fndetails.len());
         let db = reeves::open_db();
         reeves::save_analysis(&db, krate_name, fndetails);
@@ -46,14 +46,14 @@ fn main() {
     } else if args[2] == ANALYZE_AND_PRINT_COMMAND {
         let path: &Path = args[3].as_ref();
 
-        let (krate_name, fndetails) = reeves::analyze(path);
+        let (krate_name, fndetails) = reeves::analyze_crate_path(path);
         let out = serde_json::to_vec(&(krate_name, fndetails)).unwrap();
         io::stdout().write_all(&out).unwrap();
 
     } else if args[2] == "container-analyze-and-print" {
         let path: &Path = args[3].as_ref();
 
-        let (krate_name, fndetails) = container_analyze(path);
+        let (krate_name, fndetails) = container_analyze_crate_path(path);
         let out = serde_json::to_vec(&(krate_name, fndetails)).unwrap();
         io::stdout().write_all(&out).unwrap();
 
@@ -92,7 +92,7 @@ fn main() {
             }
 
             let crate_path = format!("/tmp/crate/{}-{}", krate.name, krate.version);
-            let (ref krate_name, fndetails) = container_analyze(crate_path.as_ref());
+            let (ref krate_name, fndetails) = container_analyze_crate_path(crate_path.as_ref());
             info!("finished analysing functions for {}, inserting {} function details into db", krate_name, fndetails.len());
             reeves::save_analysis(&db, krate_name, fndetails);
             fs::remove_dir_all(crate_path).unwrap();
@@ -132,7 +132,7 @@ fn main() {
     }
 }
 
-fn container_analyze(path: &Path) -> (String, Vec<FnDetail>) {
+fn container_analyze_crate_path(path: &Path) -> (String, Vec<FnDetail>) {
     const OUTPUT_LIMIT: usize = 500;
 
     let cwd = env::current_dir().unwrap();
