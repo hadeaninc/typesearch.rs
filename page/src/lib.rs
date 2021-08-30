@@ -30,7 +30,7 @@ pub fn main() {
     let env = app.mount(elt);
     info!("Mounted app...");
 
-    env.send_message(ReevesMsg::ParamsChange("&EntryType".into()));
+    env.send_message(ReevesMsg::ParamsChange("entry".into()));
     env.send_message(ReevesMsg::RetChange("bool".into()));
 
     yew::run_loop();
@@ -229,9 +229,14 @@ impl Component for ReevesComponent {
 
         html!{ <>
             <div id="control-pane">
-                <header>
-                    { "Reeves by Hadean" }<img src="https://avatars.githubusercontent.com/u/13240906?s=50&v=4"></img>
-                </header>
+                <div>
+                    <header>
+                        { "Reeves by Hadean" }<img src="https://avatars.githubusercontent.com/u/13240906?s=50&v=4"></img>
+                    </header>
+                    { "Currently searching all crates on the " }<a href="https://play.rust-lang.org">{ "Rust Playground" }</a>
+                    { " (i.e. top 100 crates from " }<a href="https://crates.io">{ "crates.io" }</a>{ ")" }
+                </div>
+                <br />
                 { maybenode(self.last_error.as_ref().map(String::as_str), error_div) }
                 <div id="search-pane"><code>
                     { "fn ???(" }

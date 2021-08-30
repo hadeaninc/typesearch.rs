@@ -47,12 +47,9 @@ pub fn open_db() -> sled::Db {
     db
 }
 
-pub fn analyze_and_save(db: &sled::Db, path: &Path) {
-    let (ref krate_name, fndetails) = analyze(path);
-    info!("finished printing functions, inserting {} function details into db", fndetails.len());
+pub fn save_analysis(db: &sled::Db, krate_name: &str, fndetails: Vec<FnDetail>) {
     purge_crate(db, krate_name);
     add_crate(db, krate_name, fndetails);
-    info!("finished inserting into db");
 }
 
 pub fn analyze(path: &Path) -> (String, Vec<FnDetail>) {

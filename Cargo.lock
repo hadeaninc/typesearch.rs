@@ -2477,6 +2477,7 @@ dependencies = [
  "meilisearch-sdk",
  "profile",
  "project_model",
+ "rayon",
  "reeves-types",
  "rust-analyzer",
  "serde",
