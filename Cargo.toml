@@ -9,10 +9,11 @@ edition = "2018"
 reeves-types = { path = "reeves-types" }
 
 # rust-analyzer
-base_db = { path = "rust-analyzer/crates/base_db" }
-hir = { path = "rust-analyzer/crates/hir" }
-profile = { path = "rust-analyzer/crates/profile" }
-project_model = { path = "rust-analyzer/crates/project_model" }
+ra-base_db = { package = "base_db", path = "rust-analyzer/crates/base_db" }
+ra-hir = { package = "hir", path = "rust-analyzer/crates/hir" }
+ra-profile = { package = "profile", path = "rust-analyzer/crates/profile" }
+ra-project_model = { package = "project_model", path = "rust-analyzer/crates/project_model" }
+ra-paths = { package = "paths", path = "rust-analyzer/crates/paths" }
 rust-analyzer = { path = "rust-analyzer/crates/rust-analyzer" }
 
 # srv

@@ -5,7 +5,7 @@ set -o nounset
 set -o xtrace
 
 CARGO="cargo --color=always"
-RUST_LOG="warn,server=trace,reeves=trace,actix=info"
+RUST_LOG="warn,server=debug,reeves=debug,actix=info"
 export RUST_BACKTRACE=1
 
 if [ "$1" = build ]; then

@@ -71,8 +71,9 @@ enum ReevesCmd {
     Serve {
         #[structopt(long, default_value = "page/pkg.tar")]
         static_tar: PathBuf,
-        #[structopt(default_value = "127.0.0.1")]
+        #[structopt(long, default_value = "127.0.0.1")]
         ip: String,
+        #[structopt(long)]
         port: String,
     },
     #[structopt(about = "Dump contents of the reeves DB (requires: reeves DB)")]

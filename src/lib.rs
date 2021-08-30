@@ -1,12 +1,13 @@
-use base_db::Upcast;
-use hir::db::{DefDatabase, HirDatabase};
-use hir::{HasVisibility, HirDisplay};
-use hir::Crate;
-use hir::ItemInNs;
-use hir::ModuleDef;
-use hir::Visibility;
-use profile::StopWatch;
-use project_model::CargoConfig;
+use ra_base_db::Upcast;
+use ra_hir::db::{DefDatabase, HirDatabase};
+use ra_hir::{HasVisibility, HirDisplay};
+use ra_hir::Crate;
+use ra_hir::ItemInNs;
+use ra_hir::ModuleDef;
+use ra_hir::Visibility;
+use ra_paths::{AbsPath, AbsPathBuf};
+use ra_profile::StopWatch;
+use ra_project_model::{CargoConfig, ProjectManifest, ProjectWorkspace, TargetKind};
 use rust_analyzer::cli::load_cargo::{LoadCargoConfig, load_workspace_at};
 
 use log::{trace, debug, info};
@@ -72,7 +73,9 @@ pub fn analyze_crate_path(path: &Path) -> (String, Vec<FnDetail>) {
     let hirdb: &dyn HirDatabase = rootdb.upcast();
     let defdb: &dyn DefDatabase = rootdb.upcast();
 
-    let (krate_name, krate_import_name) = discover_crate_import_name(path, &cargo_config);
+    use std::convert::TryInto;
+    let abspath: AbsPathBuf = path.canonicalize().unwrap().try_into().unwrap();
+    let (krate_name, krate_import_name) = discover_crate_import_name(&abspath, &cargo_config);
 
     let krates = Crate::all(hirdb);
     for krate in krates {
@@ -327,17 +330,14 @@ pub fn debugdb(db: &sled::Db) {
     }
 }
 
-fn discover_crate_import_name(path: &Path, cargo_config: &CargoConfig) -> (String, String) {
+fn discover_crate_import_name(path: &AbsPath, cargo_config: &CargoConfig) -> (String, String) {
     // If you want to see some of the complexity here:
     // - md-5 package name is 'md-5', but target name (and import name) is 'md5'
     //
     // We are taking crates from crates.io, so we can assume:
     // - there is only one package (i.e. not a workspace)
     // - there is only one lib
-    use project_model::{ProjectManifest, ProjectWorkspace, TargetKind};
-    use std::convert::TryInto;
-    let p: &_ = path.try_into().unwrap();
-    let root = ProjectManifest::discover_single(&p).unwrap();
+    let root = ProjectManifest::discover_single(path).unwrap();
     let ws = ProjectWorkspace::load(root, cargo_config, &|_| {}).unwrap();
     let cargo = match ws {
         ProjectWorkspace::Cargo { cargo, .. } => cargo,
@@ -432,7 +432,7 @@ fn purge_crate(db: &sled::Db, name: &str) {
     let () = ret.unwrap();
 }
 
-fn analyze_function(hirdb: &dyn HirDatabase, krate_name: &str, function: hir::Function, path: &str) -> Vec<FnDetail> {
+fn analyze_function(hirdb: &dyn HirDatabase, krate_name: &str, function: ra_hir::Function, path: &str) -> Vec<FnDetail> {
     let assoc_params_pretty = function.assoc_fn_params(hirdb)
         .into_iter().map(|param| param.ty().display(hirdb).to_string())
         .collect::<Vec<_>>();
@@ -457,12 +457,12 @@ fn analyze_function(hirdb: &dyn HirDatabase, krate_name: &str, function: hir::Fu
     }]
 }
 
-fn analyze_adt(hirdb: &dyn HirDatabase, krate_name: &str, adt: hir::Adt, path: &str) -> Vec<FnDetail> {
+fn analyze_adt(hirdb: &dyn HirDatabase, krate_name: &str, adt: ra_hir::Adt, path: &str) -> Vec<FnDetail> {
     let mut methods = vec![];
     let ty = adt.ty(hirdb);
     let krate = adt.module(hirdb).krate();
     let _: Option<()> = ty.clone().iterate_assoc_items(hirdb, krate, |associtem| {
-        if let hir::AssocItem::Function(f) = associtem { methods.push(f) }
+        if let ra_hir::AssocItem::Function(f) = associtem { methods.push(f) }
         None
     });
     let _: Option<()> = ty.iterate_method_candidates(hirdb, krate, &Default::default(), None, |_ty, f| {
@@ -479,7 +479,7 @@ fn analyze_adt(hirdb: &dyn HirDatabase, krate_name: &str, adt: hir::Adt, path: &
     fndetails
 }
 
-fn analyze_trait(hirdb: &dyn HirDatabase, _krate_name: &str, tr: hir::Trait, path: &str) -> Vec<FnDetail> {
+fn analyze_trait(hirdb: &dyn HirDatabase, _krate_name: &str, tr: ra_hir::Trait, path: &str) -> Vec<FnDetail> {
     trace!("trait {} {:?}", path, tr.items(hirdb));
     vec![]
 }
