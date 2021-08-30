@@ -18,21 +18,25 @@ use reeves_types::*;
 // We re-exec this in a container, so need to know how to invoke it
 const ANALYZE_AND_PRINT_COMMAND: &str = "analyze-and-print";
 
-const ENV_RUST_ANALYZER_BINARY: &str = "REEVES_RUST_ANALYZER_BINARY";
 // NOTE: this variable assumes that reeves never re-executes itself in the
 // same environment (inside a container is fine, as the environment isn't shared)
 // We need this because some parts of RA can execute themselves, but we use
 // it as a library, so to differentiate whether we're starting reeves or rust
 // analyzer, we set this variable on reeves startup
 const ENV_RUST_ANALYZER_EXEC: &str = "REEVES_INTERNAL_RUST_ANALYZER_EXEC";
+// This gets translated from an argument as soon as reeves starts up, so we know
+// what to exec
+const ENV_RUST_ANALYZER_BINARY: &str = "REEVES_INTERNAL_RUST_ANALYZER_BINARY";
 
 #[derive(Debug, StructOpt)]
 #[structopt(name = "reeves", about = "A tool for indexing and searching crates")]
 struct ReevesOpt {
-    #[structopt(default_value = "reeves.db")]
+    #[structopt(long, default_value = "reeves.db")]
     db: PathBuf,
-    #[structopt(default_value = "criner/criner.db")]
+    #[structopt(long, default_value = "criner/criner.db")]
     criner_db: PathBuf,
+    #[structopt(long, default_value = "rust-analyzer/target/release/rust-analyzer")]
+    rust_analyzer: PathBuf,
     #[structopt(subcommand)]
     cmd: ReevesCmd,
 }
@@ -64,10 +68,7 @@ fn main() {
     // See comment on ENV_RUST_ANALYZER_EXEC
     if env::var_os(ENV_RUST_ANALYZER_EXEC).is_some() {
         debug!("Re-executing rust-analyzer");
-        let mut cmd = match env::var_os(ENV_RUST_ANALYZER_BINARY) {
-            Some(v) => Command::new(v),
-            None => Command::new("./rust-analyzer/target/release/rust-analyzer"),
-        };
+        let mut cmd = Command::new(env::var_os(ENV_RUST_ANALYZER_BINARY).unwrap());
         cmd.args(env::args_os().skip(1)).exec();
         panic!("did not exec");
     } else {
@@ -75,6 +76,9 @@ fn main() {
     }
 
     let opt = ReevesOpt::from_args();
+
+    env::set_var(ENV_RUST_ANALYZER_BINARY, opt.rust_analyzer);
+
     match opt.cmd {
 
         ReevesCmd::AnalyzeAndSave { crate_path } => {
@@ -183,7 +187,7 @@ fn container_analyze_crate_path(path: &Path) -> (String, Vec<FnDetail>) {
     let res = Command::new("podman").args(&["run", "--rm"])
         // Basics
         .args(&["-v", &format!("{}/container-state:/work", cwd), "-v", &format!("{}:/crate", path.display())])
-        .args(&["-e=RUST_ANALYZER_BINARY=/work/rust-analyzer", "-e=RUSTUP_HOME=/work/rustup", "-e=CARGO_HOME=/work/cargo"])
+        .args(&["-e=RUSTUP_HOME=/work/rustup", "-e=CARGO_HOME=/work/cargo"])
         // Custom
         .args(&["-w=/crate", "--net=host"])
         // Command
@@ -203,14 +207,15 @@ fn container_analyze_crate_path(path: &Path) -> (String, Vec<FnDetail>) {
 
     let res = Command::new("podman").args(&["run", "--rm"])
         // Basics
+        // NOTE: these are read-only
         .args(&["-v", &format!("{}/container-state:/work:ro", cwd), "-v", &format!("{}:/crate:ro", path.display())])
-        .args(&["-e=RUST_ANALYZER_BINARY=/work/rust-analyzer", "-e=RUSTUP_HOME=/work/rustup", "-e=CARGO_HOME=/work/cargo"])
+        .args(&["-e=RUSTUP_HOME=/work/rustup", "-e=CARGO_HOME=/work/cargo"])
         // Custom
         .args(&["-w=/work", "--net=none"])
         .args(&["-v", &format!("{}:/reeves:ro", &env::current_exe().unwrap().to_str().unwrap())])
         // Command
         .args(&["ubuntu:20.04", "bash", "-c"])
-        .arg(format!("PATH=$PATH:/work/cargo/bin /reeves x {} /crate", ANALYZE_AND_PRINT_COMMAND))
+        .arg(format!("PATH=$PATH:/work/cargo/bin /reeves --rust-analyzer /work/rust-analyzer {} /crate", ANALYZE_AND_PRINT_COMMAND))
         .output().unwrap();
 
     if !res.status.success() {
