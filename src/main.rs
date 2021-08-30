@@ -45,6 +45,7 @@ struct ReevesOpt {
 
 #[derive(Debug, StructOpt)]
 enum ReevesCmd {
+    #[structopt(about = "Analyze a crate and save results (requires: rust analyzer)")]
     AnalyzeAndSave {
         crate_path: PathBuf,
     },
