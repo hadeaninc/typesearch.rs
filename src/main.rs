@@ -30,13 +30,15 @@ const ENV_RUST_ANALYZER_EXEC: &str = "REEVES_INTERNAL_RUST_ANALYZER_EXEC";
 // what to exec
 const ENV_RUST_ANALYZER_BINARY: &str = "REEVES_INTERNAL_RUST_ANALYZER_BINARY";
 
+const CRATE_WORK_DIR: &str = "/tmp/crate";
+
 #[derive(Debug, StructOpt)]
 #[structopt(name = "reeves", about = "A tool for indexing and searching crates")]
 struct ReevesOpt {
     #[structopt(long, default_value = "reeves.db")]
     db: PathBuf,
-    #[structopt(long, default_value = "criner/criner.db")]
-    criner_db: PathBuf,
+    #[structopt(long, default_value = "panamax-mirror")]
+    panamax_mirror: PathBuf,
     #[structopt(long, default_value = "rust-analyzer/target/release/rust-analyzer")]
     rust_analyzer: PathBuf,
     #[structopt(subcommand)]
@@ -58,8 +60,10 @@ enum ReevesCmd {
     ContainerAnalyzeAndPrint {
         crate_path: PathBuf,
     },
-    #[structopt(about = "Analyze top 100 crates from play.rust-lang.org in containers and save results (requires: container state, criner DB, reeves DB)")]
+    #[structopt(about = "Analyze top 100 crates from play.rust-lang.org in containers and save results (requires: container state, panamax mirror, reeves DB)")]
     AnalyzeTop100Crates,
+    #[structopt(about = "Analyze all crates (latest version) from crates.io in containers and save results (requires: container state, panamax mirror, reeves DB)")]
+    AnalyzeAllCrates,
     #[structopt(about = "Populate the text search backend, using the reeves DB (requires: reeves DB, running text search)")]
     LoadTextSearch,
     #[structopt(about = "Perform a search for some comma-separated param types and a ret type (requires: reeves DB, running+loaded text search)")]
@@ -100,27 +104,27 @@ fn main() {
     match opt.cmd {
 
         ReevesCmd::AnalyzeAndSave { crate_path } => {
-            let (ref krate_name, fndetails) = reeves::analyze_crate_path(&crate_path);
+            let (krate_name, krate_version, fndetails) = reeves::analyze_crate_path(&crate_path);
             info!("finished analysing functions, inserting {} function details into db", fndetails.len());
             let db = reeves::open_db(&opt.db);
-            reeves::save_analysis(&db, krate_name, fndetails);
+            reeves::save_analysis(&db, &krate_name, &krate_version, fndetails);
             info!("finished inserting into db");
         },
 
         ReevesCmd::AnalyzeAndPrint { crate_path } => {
-            let (krate_name, fndetails) = reeves::analyze_crate_path(&crate_path);
-            let out = serde_json::to_vec(&(krate_name, fndetails)).unwrap();
+            let (krate_name, krate_version, fndetails) = reeves::analyze_crate_path(&crate_path);
+            let out = serde_json::to_vec(&(krate_name, krate_version, fndetails)).unwrap();
             io::stdout().write_all(&out).unwrap();
         },
 
         ReevesCmd::ContainerAnalyzeAndPrint { crate_path } => {
-            let (krate_name, fndetails) = container_analyze_crate_path(&crate_path);
-            let out = serde_json::to_vec(&(krate_name, fndetails)).unwrap();
+            let (krate_name, krate_version, fndetails) = container_analyze_crate_path(&crate_path);
+            let out = serde_json::to_vec(&(krate_name, krate_version, fndetails)).unwrap();
             io::stdout().write_all(&out).unwrap();
         },
 
         ReevesCmd::AnalyzeTop100Crates => {
-            let criner_db_path = &opt.criner_db;
+            let panamax_mirror_path = &opt.panamax_mirror;
 
             #[derive(Deserialize)]
             struct PlayCrates {
@@ -141,26 +145,56 @@ fn main() {
             let total_crates = crates.crates.len();
             use std::sync::atomic::{AtomicUsize, Ordering};
             let progress = AtomicUsize::new(0);
-            fs::create_dir_all("/tmp/crate").unwrap();
             crates.crates.par_iter().for_each(|krate| {
                 info!("analyzing crate {}-{}", krate.name, krate.version);
-                let crate_tar_path = crate_to_tar_path(criner_db_path.as_ref(), &krate.name, &krate.version);
-                let crate_tar_path = crate_tar_path.to_str().unwrap();
-                let res = Command::new("tar")
-                    .args(&["-C", "/tmp/crate", "-xzf", crate_tar_path])
-                    .status().unwrap();
-                if !res.success() {
-                    panic!("failed to create extracted crate")
-                }
-
-                let crate_path = format!("/tmp/crate/{}-{}", krate.name, krate.version);
-                let (ref krate_name, fndetails) = container_analyze_crate_path(crate_path.as_ref());
-                info!("finished analysing functions for {}, inserting {} function details into db", krate_name, fndetails.len());
-                reeves::save_analysis(&db, krate_name, fndetails);
-                fs::remove_dir_all(crate_path).unwrap();
+                let fndetails = container_analyze_crate(panamax_mirror_path, &krate.name, &krate.version);
+                info!("finished analysing functions for {} {}, inserting {} function details into db", krate.name, krate.version, fndetails.len());
+                reeves::save_analysis(&db, &krate.name, &krate.version, fndetails);
                 let current_progress = progress.fetch_add(1, Ordering::SeqCst)+1;
-                info!("finished inserting into db for {}, completed {}/{} crates", krate_name, current_progress, total_crates);
+                info!("finished inserting into db for {} {}, completed {}/{} crates", krate.name, krate.version, current_progress, total_crates);
             });
+        }
+
+        ReevesCmd::AnalyzeAllCrates => {
+            let panamax_mirror_path = &opt.panamax_mirror;
+
+            let db = reeves::open_db(&opt.db);
+
+            let index = crates_index::Index::new(panamax_mirror_path.join("crates.io-index"));
+            assert!(index.exists());
+
+            // TODO: exclude yanked versions?
+            let crates: Vec<_> = index.crates().map(|c| (c.name().to_owned(), c.highest_version().version().to_owned())).collect();
+
+            use std::sync::Mutex;
+            #[derive(Debug)]
+            struct Counter {
+                considered: usize,
+                processed: usize,
+            }
+            let count = Mutex::new(Counter { considered: 0, processed: 0 });
+            // TODO: handle failures
+            crates.par_iter().for_each(|(name, version)| {
+                let processed;
+                if !reeves::has_crate(&db, name, version) {
+                    info!("analyzing crate {}-{}", name, version);
+                    let fndetails = container_analyze_crate(panamax_mirror_path, &name, &version);
+                    info!("finished analysing functions for {} {}, inserting {} function details into db", name, version, fndetails.len());
+                    reeves::save_analysis(&db, &name, &version, fndetails);
+                    info!("finished inserting into db for {} {}", name, version);
+                    processed = 1
+                } else {
+                    info!("skipping crate {}-{}, already in db", name, version);
+                    processed = 0
+                };
+                {
+                    let mut count = count.lock().unwrap();
+                    count.considered += 1;
+                    count.processed += processed;
+                    println!("current count: {} processed, {} / {} total", count.processed, count.considered, crates.len());
+                }
+            });
+            println!("finished: {:?}", count);
         }
 
         ReevesCmd::LoadTextSearch => {
@@ -200,7 +234,28 @@ fn main() {
     }
 }
 
-fn container_analyze_crate_path(path: &Path) -> (String, Vec<FnDetail>) {
+fn container_analyze_crate(panamax_mirror_path: &Path, krate_name: &str, krate_version: &str) -> Vec<FnDetail> {
+    fs::create_dir_all(CRATE_WORK_DIR).unwrap();
+
+    let crate_tar_path = crate_to_tar_path(panamax_mirror_path, krate_name, krate_version);
+    let crate_tar_path = crate_tar_path.to_str().unwrap();
+    let res = Command::new("tar")
+        .args(&["-C", CRATE_WORK_DIR, "-xzf", crate_tar_path])
+        .status().unwrap();
+    if !res.success() {
+        panic!("failed to create extracted crate")
+    }
+
+    let crate_path = format!("{}/{}-{}", CRATE_WORK_DIR, krate_name, krate_version);
+    let (krate_name_, krate_version_, fndetails) = container_analyze_crate_path(crate_path.as_ref());
+    assert_eq!((krate_name, krate_version), (krate_name_.as_str(), krate_version_.as_str()));
+
+    fs::remove_dir_all(crate_path).unwrap();
+
+    fndetails
+}
+
+fn container_analyze_crate_path(path: &Path) -> (String, String, Vec<FnDetail>) {
     const OUTPUT_LIMIT: usize = 500;
 
     let cwd = env::current_dir().unwrap();
@@ -259,20 +314,20 @@ fn container_analyze_crate_path(path: &Path) -> (String, Vec<FnDetail>) {
     }
 }
 
-fn crate_to_tar_path(criner_path: &Path, name: &str, version: &str) -> PathBuf {
+fn crate_to_tar_path(panamax_mirror_path: &Path, name: &str, version: &str) -> PathBuf {
     let crate_path = if name.len() >= 4 {
         format!("{}/{}/{}", &name[..2], &name[2..4], name)
     } else if name.len() == 3 {
-        format!("3/{}/{}", &name[..1], &name[1..3])
+        format!("3/{}", name)
     } else if name.len() == 2 {
-        format!("2/{}", &name)
+        format!("2/{}", name)
     } else if name.len() == 1 {
-        format!("1/{}", &name)
+        format!("1/{}", name)
     } else {
         unreachable!("crate name invalid: {:?}", name)
     };
 
-    let version_path = format!("{}-download:1.0.0.crate", version);
+    let version_path = format!("{}/{}-{}.crate", version, name, version);
 
-    criner_path.join("assets").join(crate_path).join(version_path)
+    panamax_mirror_path.join("crates").join(crate_path).join(version_path)
 }

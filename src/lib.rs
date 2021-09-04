@@ -30,6 +30,7 @@ const FN_ID_COUNTER: &str = "next_fn_id";
 const PARAM_TREE: &str = "param";
 const RET_TREE: &str = "ret";
 const FN_TREE: &str = "fn";
+const CRATE_TREE: &str = "fn";
 
 // For fuzzy searching
 const PARAM_TYPES_INDEX: &str = "param_types";
@@ -47,12 +48,21 @@ pub fn open_db(path: &Path) -> sled::Db {
     db
 }
 
-pub fn save_analysis(db: &sled::Db, krate_name: &str, fndetails: Vec<FnDetail>) {
+pub fn save_analysis(db: &sled::Db, krate_name: &str, krate_version: &str, fndetails: Vec<FnDetail>) {
     purge_crate(db, krate_name);
-    add_crate(db, krate_name, fndetails);
+    add_crate(db, krate_name, krate_version, fndetails);
 }
 
-pub fn analyze_crate_path(path: &Path) -> (String, Vec<FnDetail>) {
+pub fn has_crate(db: &sled::Db, krate_name: &str, krate_version: &str) -> bool {
+    let crate_tree = db.open_tree(CRATE_TREE).unwrap();
+    let (version, _fn_ids): (String, Vec<u64>) = match crate_tree.get(krate_name).unwrap() {
+        Some(bs) => bincode::deserialize(&bs).unwrap(),
+        None => return false,
+    };
+    version == krate_version
+}
+
+pub fn analyze_crate_path(path: &Path) -> (String, String, Vec<FnDetail>) {
     let mut db_load_sw = stop_watch();
     if !path.is_dir() {
         panic!("path is not a directory")
@@ -75,7 +85,7 @@ pub fn analyze_crate_path(path: &Path) -> (String, Vec<FnDetail>) {
 
     use std::convert::TryInto;
     let abspath: AbsPathBuf = path.canonicalize().unwrap().try_into().unwrap();
-    let (krate_name, krate_import_name) = discover_crate_import_name(&abspath, &cargo_config);
+    let (krate_name, krate_import_name, krate_version) = discover_crate_import_name(&abspath, &cargo_config);
 
     let krates = Crate::all(hirdb);
     for krate in krates {
@@ -83,7 +93,7 @@ pub fn analyze_crate_path(path: &Path) -> (String, Vec<FnDetail>) {
         if krate_import_name != display_name {
             continue
         }
-        info!("found crate: {:?} (import name {})", krate_name, display_name);
+        info!("found crate: {:?} {} (import name {})", krate_name, krate_version, display_name);
         let mut moddefs = HashSet::new();
         let import_map = defdb.import_map(krate.into());
         let mut fndetails = vec![];
@@ -111,7 +121,7 @@ pub fn analyze_crate_path(path: &Path) -> (String, Vec<FnDetail>) {
             trace!("adding {} items", import_fndetails.len());
             fndetails.extend(import_fndetails);
         }
-        return (krate_name, fndetails)
+        return (krate_name, krate_version, fndetails)
     }
     panic!("didn't find crate {} (import name {})!", krate_name, krate_import_name)
 }
@@ -330,7 +340,7 @@ pub fn debugdb(db: &sled::Db) {
     }
 }
 
-fn discover_crate_import_name(path: &AbsPath, cargo_config: &CargoConfig) -> (String, String) {
+fn discover_crate_import_name(path: &AbsPath, cargo_config: &CargoConfig) -> (String, String, String) { // name, import_name, version
     // If you want to see some of the complexity here:
     // - md-5 package name is 'md-5', but target name (and import name) is 'md5'
     //
@@ -345,16 +355,17 @@ fn discover_crate_import_name(path: &AbsPath, cargo_config: &CargoConfig) -> (St
     };
     let members = cargo.packages().map(|pd| &cargo[pd]).filter(|pd| pd.is_member).collect::<Vec<_>>();
     assert_eq!(members.len(), 1, "{:?}", members);
+    let version = members[0].version.to_string();
     let lib_targets = members[0].targets.iter().map(|&t| &cargo[t]).filter(|t| t.kind == TargetKind::Lib).collect::<Vec<_>>();
     assert_eq!(lib_targets.len(), 1, "{:?}", lib_targets);
-    (members[0].name.clone(), lib_targets[0].name.replace('-', "_"))
+    (members[0].name.clone(), lib_targets[0].name.replace('-', "_"), version)
 }
 
-fn add_crate(db: &sled::Db, name: &str, fndetails: Vec<FnDetail>) -> u64 {
+fn add_crate(db: &sled::Db, name: &str, version: &str, fndetails: Vec<FnDetail>) -> u64 {
     let param_tree = db.open_tree(PARAM_TREE).unwrap();
     let ret_tree = db.open_tree(RET_TREE).unwrap();
     let fn_tree = db.open_tree(FN_TREE).unwrap();
-    let crate_tree = db.open_tree("crate").unwrap();
+    let crate_tree = db.open_tree(CRATE_TREE).unwrap();
     let ret: Result<u64, TransactionError<Void>> = (&**db, &param_tree, &ret_tree, &fn_tree, &crate_tree)
         .transaction(|(db, param_tree, ret_tree, fn_tree, crate_tree)| {
             let mut fn_id: u64 = bincode::deserialize(&db.get(FN_ID_COUNTER).unwrap().unwrap()).unwrap();
@@ -386,7 +397,7 @@ fn add_crate(db: &sled::Db, name: &str, fndetails: Vec<FnDetail>) -> u64 {
 
                 fn_id += 1
             }
-            crate_tree.insert(name, bincode::serialize(&fn_ids).unwrap()).unwrap();
+            crate_tree.insert(name, bincode::serialize(&(version, fn_ids)).unwrap()).unwrap();
             db.insert(FN_ID_COUNTER, bincode::serialize(&fn_id).unwrap()).unwrap();
             Ok(fn_id)
         });
@@ -397,11 +408,11 @@ fn purge_crate(db: &sled::Db, name: &str) {
     let param_tree = db.open_tree(PARAM_TREE).unwrap();
     let ret_tree = db.open_tree(RET_TREE).unwrap();
     let fn_tree = db.open_tree(FN_TREE).unwrap();
-    let crate_tree = db.open_tree("crate").unwrap();
+    let crate_tree = db.open_tree(CRATE_TREE).unwrap();
     let ret: Result<(), TransactionError<Void>> = (&**db, &param_tree, &ret_tree, &fn_tree, &crate_tree)
         .transaction(|(_db, param_tree, ret_tree, fn_tree, crate_tree)| {
-            let fn_ids: Vec<u64> = match crate_tree.remove(name).unwrap() {
-                Some(fn_ids) => bincode::deserialize(&fn_ids).unwrap(),
+            let (_version, fn_ids): (String, Vec<u64>) = match crate_tree.remove(name).unwrap() {
+                Some(bs) => bincode::deserialize(&bs).unwrap(),
                 None => return Ok(()),
             };
             let fndetails: Vec<(u64, FnDetail)> = fn_ids.into_iter()

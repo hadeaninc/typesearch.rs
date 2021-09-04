@@ -22,9 +22,9 @@ The typesearch.rs frontend uses:
 Optional:
 
  - if building the web frontend - wasm-pack - `cargo install wasm-pack`
- - if doing large scale analysis (e.g. top100) - a full crates.io mirror with [criner](https://github.com/the-lean-crate/criner)
-   - tell typesearch.rs how to find it with the `--criner-db` global flag
- - if doing container analysis - a running instance of [cargo-cacher](https://github.com/ChrisMacNaughton/cargo-cacher) at 127.0.0.1:8888
+ - if doing large scale analysis (e.g. top100) - a full crates.io mirror with [Panamax](https://github.com/panamax-rs/panamax)
+   - tell typesearch.rs how to find it with the `--panamax-mirror` global flag
+ - if doing container analysis - a running instance of `panamax serve` at 127.0.0.1:8888
  - if doing container analysis - podman
 
 ## Get up and running
@@ -91,15 +91,17 @@ FLAGS:
     -V, --version    Prints version information
 
 OPTIONS:
-        --criner-db <criner-db>             [default: criner/criner.db]
-        --db <db>                           [default: reeves.db]
-        --rust-analyzer <rust-analyzer>     [default: rust-analyzer/target/release/rust-analyzer]
+        --db <db>                             [default: reeves.db]
+        --panamax-mirror <panamax-mirror>     [default: panamax-mirror]
+        --rust-analyzer <rust-analyzer>       [default: rust-analyzer/target/release/rust-analyzer]
 
 SUBCOMMANDS:
+    analyze-all-crates             Analyze all crates (latest version) from crates.io in containers and save results
+                                   (requires: container state, panamax mirror, reeves DB)
     analyze-and-print              Analyze a crate and print JSON output (requires: rust analyzer)
     analyze-and-save               Analyze a crate and save results (requires: rust analyzer)
     analyze-top100-crates          Analyze top 100 crates from play.rust-lang.org in containers and save results
-                                   (requires: container state, criner DB, reeves DB)
+                                   (requires: container state, panamax mirror, reeves DB)
     container-analyze-and-print    Analyze a crate in a secure container and print JSON output (requires: container
                                    state)
     debug-db                       Dump contents of the reeves DB (requires: reeves DB)
@@ -116,3 +118,4 @@ SUBCOMMANDS:
 
  - Move from sled to sqlite to support multiprocess access
  - Analyse all crates on crates.io
+ - Search concretised generics, e.g. searching for `Archive -> File` should return `Archive<T>::into_inner() -> T`

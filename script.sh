@@ -81,15 +81,15 @@ elif [ "$1" = prep-container ]; then
 replace-with = "mirror"
 
 [source.mirror]
-registry = "http://localhost:8888/index"
+registry = "http://localhost:8888/git/crates.io-index"
 ' > $CARGO_HOME/config
     podman pull ubuntu:20.04
 
-    # Apparently this is the best way to update the registry - https://github.com/rust-lang/crater/pull/301/files
-    podman run -it --rm --net host \
-        -w /work -e RUSTUP_HOME=/work/rustup -e CARGO_HOME=/work/cargo -v $(pwd):/work \
-        ubuntu:20.04 /work/cargo/bin/cargo install lazy_static || true
-    echo "Ignore the error above if it just complains about 'there is nothing to install'"
+    ## Apparently this is the best way to update the registry - https://github.com/rust-lang/crater/pull/301/files
+    #podman run -it --rm --net host \
+    #    -w /work -e RUSTUP_HOME=/work/rustup -e CARGO_HOME=/work/cargo -v $(pwd):/work \
+    #    ubuntu:20.04 /work/cargo/bin/cargo install lazy_static || true
+    #echo "Ignore the error above if it just complains about 'there is nothing to install'"
 
 elif [ "$1" = vim ]; then
     vim -p notes script.sh Cargo.toml src/main.rs src/lib.rs reeves-types/src/lib.rs page/src/lib.rs page/Cargo.toml src/server.rs
