@@ -16,7 +16,7 @@ use serde::{Serialize, Deserialize};
 use sled::Transactional;
 use sled::transaction::TransactionError;
 use std::cmp;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::str;
 use void::Void;
@@ -31,6 +31,9 @@ const PARAM_TREE: &str = "param";
 const RET_TREE: &str = "ret";
 const FN_TREE: &str = "fn";
 const CRATE_TREE: &str = "fn";
+
+// A sentinel to represent functions with no arguments (must not be a possible type)
+const NIL_PARAMS: &str = "<NOARGS>";
 
 // For fuzzy searching
 const PARAM_TYPES_INDEX: &str = "param_types";
@@ -361,46 +364,80 @@ fn discover_crate_import_name(path: &AbsPath, cargo_config: &CargoConfig) -> (St
     (members[0].name.clone(), lib_targets[0].name.replace('-', "_"), version)
 }
 
-fn add_crate(db: &sled::Db, name: &str, version: &str, fndetails: Vec<FnDetail>) -> u64 {
+fn add_crate(db: &sled::Db, name: &str, version: &str, fndetails: Vec<FnDetail>) {
     let param_tree = db.open_tree(PARAM_TREE).unwrap();
     let ret_tree = db.open_tree(RET_TREE).unwrap();
     let fn_tree = db.open_tree(FN_TREE).unwrap();
     let crate_tree = db.open_tree(CRATE_TREE).unwrap();
-    let ret: Result<u64, TransactionError<Void>> = (&**db, &param_tree, &ret_tree, &fn_tree, &crate_tree)
-        .transaction(|(db, param_tree, ret_tree, fn_tree, crate_tree)| {
-            let mut fn_id: u64 = bincode::deserialize(&db.get(FN_ID_COUNTER).unwrap().unwrap()).unwrap();
-            let mut fn_ids = vec![];
-            let nil_params: Vec<String> = vec!["<NOARGS>".into()];
-            for fndetail in fndetails.iter() {
-                let mut params = &fndetail.params;
-                if params.is_empty() {
-                    params = &nil_params;
-                }
-                for param in params.iter() {
-                    let mut param_set = param_tree.get(param).unwrap()
-                        .map(|d| bincode::deserialize(d.as_ref()).unwrap()).unwrap_or_else(HashSet::new);
-                    // May not be new if multiple params of the same type
-                    let _isnew = param_set.insert(fn_id);
-                    param_tree.insert(param.as_bytes(), bincode::serialize(&param_set).unwrap()).unwrap();
-                }
 
-                let mut ret_set = ret_tree.get(&fndetail.ret).unwrap()
-                    .map(|d| bincode::deserialize(d.as_ref()).unwrap()).unwrap_or_else(HashSet::new);
-                let isnew = ret_set.insert(fn_id);
-                assert!(isnew, "{:?}", fndetail.s);
-                ret_tree.insert(fndetail.ret.as_bytes(), bincode::serialize(&ret_set).unwrap()).unwrap();
-
-                fn_tree.insert(bincode::serialize(&fn_id).unwrap(), bincode::serialize(fndetail).unwrap()).unwrap();
-                fn_ids.push(fn_id);
-
-                debug!("inserted fndetail: {}", fndetail.s);
-
-                fn_id += 1
-            }
-            crate_tree.insert(name, bincode::serialize(&(version, fn_ids)).unwrap()).unwrap();
-            db.insert(FN_ID_COUNTER, bincode::serialize(&fn_id).unwrap()).unwrap();
+    // Get a guaranteed-unique fn id from the DB. Doesn't matter if it doesn't get used, u64 is
+    // pretty big :)
+    fn reserve_fn_id_range(db: &sled::Db, num: usize) -> u64 {
+        let ret: Result<u64, TransactionError<Void>> = db.transaction(|db| {
+            let fn_id: u64 = bincode::deserialize(&db.get(FN_ID_COUNTER).unwrap().unwrap()).unwrap();
+            let range_end = fn_id + num as u64;
+            db.insert(FN_ID_COUNTER, bincode::serialize(&range_end).unwrap()).unwrap();
             Ok(fn_id)
         });
+        ret.unwrap()
+    }
+
+    let start_fn_id = reserve_fn_id_range(db, fndetails.len());
+    // Calculate everything to update
+    let mut param_sets: HashMap<String, HashSet<u64>> = HashMap::new();
+    let mut ret_sets: HashMap<String, HashSet<u64>> = HashMap::new();
+    let mut fn_ids: Vec<u64> = vec![];
+    let nil_params: Vec<String> = vec![NIL_PARAMS.into()];
+    for (i, fndetail) in fndetails.iter().enumerate() {
+        let fn_id = start_fn_id + i as u64;
+        let mut params = &fndetail.params;
+        if params.is_empty() {
+            params = &nil_params;
+        }
+        for param in params.iter() {
+            let param_set = param_sets.entry(param.to_owned()).or_insert_with(HashSet::new);
+            param_set.insert(fn_id);
+            // May not be new if multiple params of the same type
+            let _isnew = param_set.insert(fn_id);
+        }
+        let ret_set = ret_sets.entry(fndetail.ret.to_owned()).or_insert_with(HashSet::new);
+        let isnew = ret_set.insert(fn_id);
+        assert!(isnew, "{:?}", fndetail.s);
+
+        fn_ids.push(fn_id);
+    }
+
+    debug!("performed precomputation for crate {} with {} fns", name, fndetails.len());
+
+    let ret: Result<(), TransactionError<Void>> = (&param_tree, &ret_tree, &fn_tree, &crate_tree)
+        .transaction(|(param_tree, ret_tree, fn_tree, crate_tree)| {
+            debug!("inserting {} params for crate {}", param_sets.len(), name);
+            for (param, fn_ids) in param_sets.iter() {
+                let mut param_set: HashSet<u64> = param_tree.get(param).unwrap()
+                    .map(|d| bincode::deserialize(d.as_ref()).unwrap()).unwrap_or_else(HashSet::new);
+                param_set.extend(fn_ids);
+                param_tree.insert(param.as_bytes(), bincode::serialize(&param_set).unwrap()).unwrap();
+            }
+
+            debug!("inserting {} rets for crate {}", param_sets.len(), name);
+            for (ret, fn_ids) in ret_sets.iter() {
+                let mut ret_set: HashSet<u64> = ret_tree.get(ret).unwrap()
+                    .map(|d| bincode::deserialize(d.as_ref()).unwrap()).unwrap_or_else(HashSet::new);
+                ret_set.extend(fn_ids);
+                ret_tree.insert(ret.as_bytes(), bincode::serialize(&ret_set).unwrap()).unwrap();
+            }
+
+            debug!("inserting {} fndetails for crate {}", fndetails.len(), name);
+            for (i, fndetail) in fndetails.iter().enumerate() {
+                let fn_id = start_fn_id + i as u64;
+                fn_tree.insert(bincode::serialize(&fn_id).unwrap(), bincode::serialize(fndetail).unwrap()).unwrap();
+                debug!("inserted fndetail {}/{}: [{}] {}", i+1, fndetails.len(), fndetail.krate, fndetail.s);
+            }
+            crate_tree.insert(name, bincode::serialize(&(version, &fn_ids)).unwrap()).unwrap();
+            Ok(())
+        });
+
+    debug!("completed inserting crate {}", name);
     ret.unwrap()
 }
 

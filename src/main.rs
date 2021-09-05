@@ -164,6 +164,7 @@ fn main() {
             assert!(index.exists());
 
             // TODO: exclude yanked versions?
+            info!("identifying crates to analyze");
             let crates: Vec<_> = index.crates().map(|c| (c.name().to_owned(), c.highest_version().version().to_owned())).collect();
 
             use std::sync::Mutex;
@@ -174,6 +175,7 @@ fn main() {
             }
             let count = Mutex::new(Counter { considered: 0, processed: 0 });
             // TODO: handle failures
+            info!("considering {} crates", crates.len());
             crates.par_iter().for_each(|(name, version)| {
                 let processed;
                 if !reeves::has_crate(&db, name, version) {
@@ -235,10 +237,13 @@ fn main() {
 }
 
 fn container_analyze_crate(panamax_mirror_path: &Path, krate_name: &str, krate_version: &str) -> Vec<FnDetail> {
-    fs::create_dir_all(CRATE_WORK_DIR).unwrap();
-
     let crate_tar_path = crate_to_tar_path(panamax_mirror_path, krate_name, krate_version);
-    let crate_tar_path = crate_tar_path.to_str().unwrap();
+    let crate_tar_path = crate_tar_path.to_str().unwrap(); // where the crate tar currently is
+    let crate_path = format!("{}/{}-{}", CRATE_WORK_DIR, krate_name, krate_version); // where it will get extracted to
+
+    fs::create_dir_all(CRATE_WORK_DIR).unwrap();
+    fs::remove_dir_all(&crate_path).unwrap();
+
     let res = Command::new("tar")
         .args(&["-C", CRATE_WORK_DIR, "-xzf", crate_tar_path])
         .status().unwrap();
@@ -246,7 +251,6 @@ fn container_analyze_crate(panamax_mirror_path: &Path, krate_name: &str, krate_v
         panic!("failed to create extracted crate")
     }
 
-    let crate_path = format!("{}/{}-{}", CRATE_WORK_DIR, krate_name, krate_version);
     let (krate_name_, krate_version_, fndetails) = container_analyze_crate_path(crate_path.as_ref());
     assert_eq!((krate_name, krate_version), (krate_name_.as_str(), krate_version_.as_str()));
 
