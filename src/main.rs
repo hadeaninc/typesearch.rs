@@ -261,6 +261,18 @@ fn container_analyze_crate(panamax_mirror_path: &Path, krate_name: &str, krate_v
 
 fn container_analyze_crate_path(path: &Path) -> (String, String, Vec<FnDetail>) {
     const OUTPUT_LIMIT: usize = 500;
+    fn snip_output(mut s: &[u8]) -> String {
+        let mut didsnip = false;
+        if s.len() > OUTPUT_LIMIT {
+            s = &s[..OUTPUT_LIMIT];
+            didsnip = true;
+        }
+        let mut out = String::from_utf8_lossy(s).into_owned();
+        if didsnip {
+            out.push_str("[...snipped...]");
+        }
+        out
+    }
 
     let cwd = env::current_dir().unwrap();
     let cwd = cwd.to_str().unwrap();
@@ -281,11 +293,7 @@ fn container_analyze_crate_path(path: &Path) -> (String, String, Vec<FnDetail>) 
         .output().unwrap();
 
     if !res.status.success() {
-        panic!("failed to prep for analysis {}:\n====\n{}\n====\n{}\n====",
-               path.display(),
-               String::from_utf8_lossy(&res.stdout[..cmp::min(res.stdout.len(), OUTPUT_LIMIT)]),
-               String::from_utf8_lossy(&res.stderr[..cmp::min(res.stderr.len(), OUTPUT_LIMIT)])
-        )
+        panic!("failed to prep for analysis {}:\n====\n{}\n====\n{}\n====", path.display(), snip_output(&res.stdout), snip_output(&res.stderr))
     }
 
     let res = Command::new("podman").args(&["run", "--rm"])
@@ -302,11 +310,7 @@ fn container_analyze_crate_path(path: &Path) -> (String, String, Vec<FnDetail>) 
         .output().unwrap();
 
     if !res.status.success() {
-        panic!("failed to analyze {}:\n====\n{}\n====\n{}\n====",
-               path.display(),
-               String::from_utf8_lossy(&res.stdout[..cmp::min(res.stdout.len(), OUTPUT_LIMIT)]),
-               String::from_utf8_lossy(&res.stderr[..cmp::min(res.stderr.len(), OUTPUT_LIMIT)])
-        )
+        panic!("failed to analyze {}:\n====\n{}\n====\n{}\n====", path.display(), snip_output(&res.stdout), snip_output(&res.stderr))
     }
 
     match serde_json::from_slice(&res.stdout) {
