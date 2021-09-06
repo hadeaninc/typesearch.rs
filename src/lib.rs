@@ -30,7 +30,7 @@ const FN_ID_COUNTER: &str = "next_fn_id";
 const PARAM_TREE: &str = "param";
 const RET_TREE: &str = "ret";
 const FN_TREE: &str = "fn";
-const CRATE_TREE: &str = "fn";
+const CRATE_TREE: &str = "crate";
 
 // A sentinel to represent functions with no arguments (must not be a possible type)
 const NIL_PARAMS: &str = "<NOARGS>";
