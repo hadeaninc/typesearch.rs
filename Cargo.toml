@@ -31,6 +31,7 @@ crates-index = { version = "0.17", features = ["vendored-openssl"] }
 either = { version = "1.6", features = ["serde"] }
 env_logger = "0.9"
 futures = { version = "0.3", features = ["executor", "thread-pool"] }
+hadean = { path = "hadean-sdk-symlink", optional = true }
 log = "0.4"
 meilisearch-sdk = "0.10.0"
 # KEEP THIS IN SYNC WITH MEILISEARCH
@@ -41,13 +42,16 @@ sled = "0.34.6"
 structopt = "0.3"
 void = "1"
 
+[features]
+all-crates-analysis = ["hadean"]
+
 [profile.dev.package."*"]
 opt-level = 2
 
 [profile.dev]
-incremental = true
+#incremental = true
 debug = 0
 
 [profile.release]
-incremental = true
+#incremental = true
 debug = 0 # Set this to 1 or 2 to get more useful backtraces in debugger.

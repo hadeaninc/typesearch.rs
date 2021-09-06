@@ -5,6 +5,7 @@ use either::Either;
 use futures::executor::ThreadPool;
 use futures::stream::{FuturesUnordered, StreamExt};
 use futures::task::SpawnExt;
+use hadean::pool::HadeanPool;
 use isahc::prelude::*;
 use log::{debug, info, warn};
 use serde::{Serialize, Deserialize};
@@ -239,23 +240,50 @@ struct CratesProgressCounter {
     total: usize,
 }
 
+//fn cli_container_parallel_process_crates(db: &sled::Db, panamax_mirror_path: &Path, crates: &mut dyn ExactSizeIterator<Item=(String, String)>) {
+//    let count = Mutex::new(CratesProgressCounter { errored: 0, processed: 0, total: crates.len() });
+//    let pool = ThreadPool::new().unwrap();
+//    // TODO: stop iteration on panic or report somehow?
+//    let mut futs: FuturesUnordered<_> = crates.into_iter()
+//        .map(|(name, version)| {
+//            let panamax_mirror_path = panamax_mirror_path.to_owned();
+//            pool.spawn_with_handle(futures::future::lazy(move |_| {
+//                info!("analyzing crate {}-{}", name, version);
+//                let res = container_analyze_crate(&panamax_mirror_path, &name, &version);
+//                ((name, version), res)
+//            })).unwrap()
+//        })
+//        .collect();
+//    futures::executor::block_on(async {
+//        while let Some(((name, version), res)) = futs.next().await {
+//            cli_finish_and_save_analysis(&db, res, &name, &version, &count)
+//        }
+//    });
+//    info!("finished: {:?}", count);
+//}
 fn cli_container_parallel_process_crates(db: &sled::Db, panamax_mirror_path: &Path, crates: &mut dyn ExactSizeIterator<Item=(String, String)>) {
     let count = Mutex::new(CratesProgressCounter { errored: 0, processed: 0, total: crates.len() });
-    let pool = ThreadPool::new().unwrap();
+    let mut pool = HadeanPool::new(8);
+    #[derive(Serialize, Deserialize)]
+    struct Ctx {
+        panamax_mirror_path: PathBuf,
+        name: String,
+        version: String,
+    }
     // TODO: stop iteration on panic or report somehow?
     let mut futs: FuturesUnordered<_> = crates.into_iter()
         .map(|(name, version)| {
             let panamax_mirror_path = panamax_mirror_path.to_owned();
-            pool.spawn_with_handle(futures::future::lazy(move |_| {
+            pool.execute(move |Ctx { panamax_mirror_path, name, version }: Ctx| {
                 info!("analyzing crate {}-{}", name, version);
                 let res = container_analyze_crate(&panamax_mirror_path, &name, &version);
-                ((name, version), res)
-            })).unwrap()
+                ((name, version), res.map_err(|e| format!("{:?}", e)))
+            }, Ctx { panamax_mirror_path, name, version })
         })
         .collect();
     futures::executor::block_on(async {
         while let Some(((name, version), res)) = futs.next().await {
-            cli_finish_and_save_analysis(&db, res, &name, &version, &count)
+            cli_finish_and_save_analysis(&db, res.map_err(|e| anyhow::Error::msg(e)), &name, &version, &count)
         }
     });
     info!("finished: {:?}", count);

@@ -22,6 +22,9 @@ if [ "$1" = build ]; then
     elif [ "$arg" = "release" ]; then
         ./script.sh build binary --release
         ./script.sh build page --profiling
+    elif [ "$arg" = "release-with-allcrates" ]; then
+        ./script.sh build binary --release --features "all-crates-analysis"
+        ./script.sh build page --profiling
 
     elif [ "$arg" = "binary" ]; then
         $CARGO build --all "$@"
