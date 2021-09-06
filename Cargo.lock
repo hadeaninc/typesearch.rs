@@ -910,6 +910,9 @@ name = "either"
 version = "1.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e78d4f1cc4ae33bbfc157ed5d5a5ef3bc29227303d595861deb238fcec4e9457"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "ena"
@@ -1909,9 +1912,9 @@ dependencies = [
 
 [[package]]
 name = "meilisearch-sdk"
-version = "0.9.0"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e0ba1f937372c3d1877f72d9d222e83536a480bd0724a033e522ef623e876ea0"
+checksum = "023b3e013425d9b95a4f7ff3f1ff791966e2c9f6b83395de9ff22d66144564d8"
 dependencies = [
  "futures",
  "isahc",
@@ -2606,6 +2609,7 @@ dependencies = [
  "base_db",
  "bincode",
  "crates-index",
+ "either",
  "env_logger",
  "filesystem",
  "futures",

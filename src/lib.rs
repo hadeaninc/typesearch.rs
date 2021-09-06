@@ -10,6 +10,7 @@ use ra_profile::StopWatch;
 use ra_project_model::{CargoConfig, ProjectManifest, ProjectWorkspace, TargetKind};
 use rust_analyzer::cli::load_cargo::{LoadCargoConfig, load_workspace_at};
 
+use anyhow::{Error, Result, anyhow};
 use log::{trace, debug, info};
 use meilisearch_sdk as meili;
 use serde::{Serialize, Deserialize};
@@ -26,11 +27,12 @@ use reeves_types::*;
 const FUZZY_SEARCH_LIMIT: usize = 100;
 const MAX_RESULTS: usize = 500;
 
-const FN_ID_COUNTER: &str = "next_fn_id";
-const PARAM_TREE: &str = "param";
-const RET_TREE: &str = "ret";
-const FN_TREE: &str = "fn";
-const CRATE_TREE: &str = "crate";
+const FN_ID_COUNTER: &str = "next_fn_id"; // single u64 serialized value
+const PARAM_TREE: &str = "param"; // param_type_str.as_bytes() => bincode::serialize(HashSet<fn_id: u64>)
+const RET_TREE: &str = "ret"; // ret_type_str.as_bytes() => bincode::serialize(HashSet<fn_id: u64>)
+const FN_TREE: &str = "fn"; // bincode::serialize(fn_id: u64) => bincode::serialize(FnDetail)
+const CRATE_TREE: &str = "crate"; // crate_name_str.as_bytes() => bincode::serialize((version: String, fn_ids: Vec<u64>))
+const ERROR_TREE: &str = "crate-error"; // crate_name_str.as_bytes() => bincode::serialize((version: String, err: String))
 
 // A sentinel to represent functions with no arguments (must not be a possible type)
 const NIL_PARAMS: &str = "<NOARGS>";
@@ -56,16 +58,28 @@ pub fn save_analysis(db: &sled::Db, krate_name: &str, krate_version: &str, fndet
     add_crate(db, krate_name, krate_version, fndetails);
 }
 
-pub fn has_crate(db: &sled::Db, krate_name: &str, krate_version: &str) -> bool {
-    let crate_tree = db.open_tree(CRATE_TREE).unwrap();
-    let (version, _fn_ids): (String, Vec<u64>) = match crate_tree.get(krate_name).unwrap() {
-        Some(bs) => bincode::deserialize(&bs).unwrap(),
-        None => return false,
-    };
-    version == krate_version
+pub fn save_analysis_error(db: &sled::Db, krate_name: &str, krate_version: &str, err: &str) {
+    purge_crate(db, krate_name);
+    add_crate_error(db, krate_name, krate_version, err);
 }
 
-pub fn analyze_crate_path(path: &Path) -> (String, String, Vec<FnDetail>) {
+pub fn has_crate(db: &sled::Db, krate_name: &str, krate_version: &str) -> bool {
+    let crate_tree = db.open_tree(CRATE_TREE).unwrap();
+    let error_tree = db.open_tree(ERROR_TREE).unwrap();
+    // Have a successful analysis of the crate?
+    if let Some(bs) = crate_tree.get(krate_name.as_bytes()).unwrap() {
+        let (version, _fn_ids): (String, Vec<u64>) = bincode::deserialize(&bs).unwrap();
+        return version == krate_version
+    }
+    // Have an errored analysis of the crate?
+    if let Some(bs) = error_tree.get(krate_name.as_bytes()).unwrap() {
+        let version = str::from_utf8(&bs).unwrap();
+        return version == krate_version
+    }
+    false
+}
+
+pub fn analyze_crate_path(path: &Path) -> (String, String, Result<Vec<FnDetail>>) {
     let mut db_load_sw = stop_watch();
     if !path.is_dir() {
         panic!("path is not a directory")
@@ -88,7 +102,10 @@ pub fn analyze_crate_path(path: &Path) -> (String, String, Vec<FnDetail>) {
 
     use std::convert::TryInto;
     let abspath: AbsPathBuf = path.canonicalize().unwrap().try_into().unwrap();
-    let (krate_name, krate_import_name, krate_version) = discover_crate_import_name(&abspath, &cargo_config);
+    let (krate_name, krate_import_name, krate_version) = match discover_lib_crate_import_name(&abspath, &cargo_config) {
+        LibCrateResult::Ok(name, import_name, version) => (name, import_name, version),
+        LibCrateResult::Err(name, version, err) => return (name, version, Err(err.context("failed to interpret crate as a lib"))),
+    };
 
     let krates = Crate::all(hirdb);
     for krate in krates {
@@ -124,7 +141,7 @@ pub fn analyze_crate_path(path: &Path) -> (String, String, Vec<FnDetail>) {
             trace!("adding {} items", import_fndetails.len());
             fndetails.extend(import_fndetails);
         }
-        return (krate_name, krate_version, fndetails)
+        return (krate_name, krate_version, Ok(fndetails))
     }
     panic!("didn't find crate {} (import name {})!", krate_name, krate_import_name)
 }
@@ -274,8 +291,8 @@ pub fn load_text_search(db: &sled::Db) {
             synonyms: None,
             stop_words: Some(vec![]),
             ranking_rules: None,
-            attributes_for_faceting: Some(vec![]),
             distinct_attribute: None,
+            filterable_attributes: Some(vec![]),
             searchable_attributes: Some(vec!["ty".into()]),
             displayed_attributes: Some(vec!["orig_ty".into()]),
         };
@@ -286,39 +303,41 @@ pub fn load_text_search(db: &sled::Db) {
         let ret_types = client.get_or_create("ret_types").await.unwrap();
         ret_types.set_settings(&settings).await.unwrap().wait_for_pending_update(None, None).await.unwrap().unwrap();
 
-        async fn do_batch(index: &meili::indexes::Index, batch: &mut Vec<TypeInFn>, total: &mut usize) {
+        async fn do_batch(entrytype: &str, index: &meili::indexes::Index, batch: &mut Vec<TypeInFn>, progress: &mut usize, total: usize) {
             index.add_documents(batch, Some("id")).await.unwrap()
                 .wait_for_pending_update(None, None).await.unwrap().unwrap();
-            *total += batch.len();
-            info!("Added {} entries in total", total);
+            *progress += batch.len();
+            info!("Added {}/{} {} entries in total", progress, total, entrytype);
             batch.clear();
         }
 
-        let mut total = 0;
+        let mut progress = 0;
         let mut batch = vec![];
+        let num_params = param_tree.len();
         for (i, kv) in param_tree.iter().enumerate() {
             let (key, _val) = kv.unwrap();
             let str_key = str::from_utf8(&key).unwrap();
             let tokenized_key = tokenize_type(str_key);
             batch.push(TypeInFn { id: i as u64, ty: tokenized_key, orig_ty: str_key.to_owned() });
             if batch.len() >= 500 {
-                do_batch(&param_types, &mut batch, &mut total).await;
+                do_batch("param", &param_types, &mut batch, &mut progress, num_params).await;
             }
         }
-        do_batch(&param_types, &mut batch, &mut total).await;
+        do_batch("param", &param_types, &mut batch, &mut progress, num_params).await;
 
-        let mut total = 0;
+        let mut progress = 0;
         let mut batch = vec![];
+        let num_rets = param_tree.len();
         for (i, kv) in ret_tree.iter().enumerate() {
             let (key, _val) = kv.unwrap();
             let str_key = str::from_utf8(&key).unwrap();
             let tokenized_key = tokenize_type(str_key);
             batch.push(TypeInFn { id: i as u64, ty: tokenized_key, orig_ty: str_key.to_owned() });
             if batch.len() >= 500 {
-                do_batch(&ret_types, &mut batch, &mut total).await;
+                do_batch("ret", &ret_types, &mut batch, &mut progress, num_rets).await;
             }
         }
-        do_batch(&ret_types, &mut batch, &mut total).await;
+        do_batch("ret", &ret_types, &mut batch, &mut progress, num_params).await;
     })
 }
 
@@ -343,7 +362,11 @@ pub fn debugdb(db: &sled::Db) {
     }
 }
 
-fn discover_crate_import_name(path: &AbsPath, cargo_config: &CargoConfig) -> (String, String, String) { // name, import_name, version
+enum LibCrateResult {
+    Ok(String, String, String), // name, import_name, version
+    Err(String, String, Error), // name, version, why not a lib
+}
+fn discover_lib_crate_import_name(path: &AbsPath, cargo_config: &CargoConfig) -> LibCrateResult {
     // If you want to see some of the complexity here:
     // - md-5 package name is 'md-5', but target name (and import name) is 'md5'
     //
@@ -358,10 +381,16 @@ fn discover_crate_import_name(path: &AbsPath, cargo_config: &CargoConfig) -> (St
     };
     let members = cargo.packages().map(|pd| &cargo[pd]).filter(|pd| pd.is_member).collect::<Vec<_>>();
     assert_eq!(members.len(), 1, "{:?}", members);
+    let name = members[0].name.clone();
     let version = members[0].version.to_string();
     let lib_targets = members[0].targets.iter().map(|&t| &cargo[t]).filter(|t| t.kind == TargetKind::Lib).collect::<Vec<_>>();
-    assert_eq!(lib_targets.len(), 1, "{:?}", lib_targets);
-    (members[0].name.clone(), lib_targets[0].name.replace('-', "_"), version)
+    if lib_targets.len() == 0 {
+        LibCrateResult::Err(name, version, anyhow!("no lib targets found in crate"))
+    } else if lib_targets.len() == 1 {
+        LibCrateResult::Ok(name, lib_targets[0].name.replace('-', "_"), version)
+    } else {
+        LibCrateResult::Err(name, version, anyhow!("multiple lib targets found in crate"))
+    }
 }
 
 fn add_crate(db: &sled::Db, name: &str, version: &str, fndetails: Vec<FnDetail>) {
@@ -370,7 +399,7 @@ fn add_crate(db: &sled::Db, name: &str, version: &str, fndetails: Vec<FnDetail>)
     let fn_tree = db.open_tree(FN_TREE).unwrap();
     let crate_tree = db.open_tree(CRATE_TREE).unwrap();
 
-    // Get a guaranteed-unique fn id from the DB. Doesn't matter if it doesn't get used, u64 is
+    // Get a guaranteed-unique fn id range from the DB. Doesn't matter if it doesn't get used, u64 is
     // pretty big :)
     fn reserve_fn_id_range(db: &sled::Db, num: usize) -> u64 {
         let ret: Result<u64, TransactionError<Void>> = db.transaction(|db| {
@@ -433,12 +462,17 @@ fn add_crate(db: &sled::Db, name: &str, version: &str, fndetails: Vec<FnDetail>)
                 fn_tree.insert(bincode::serialize(&fn_id).unwrap(), bincode::serialize(fndetail).unwrap()).unwrap();
                 debug!("inserted fndetail {}/{}: [{}] {}", i+1, fndetails.len(), fndetail.krate, fndetail.s);
             }
-            crate_tree.insert(name, bincode::serialize(&(version, &fn_ids)).unwrap()).unwrap();
+            crate_tree.insert(name.as_bytes(), bincode::serialize(&(version, &fn_ids)).unwrap()).unwrap();
             Ok(())
         });
 
     debug!("completed inserting crate {}", name);
     ret.unwrap()
+}
+
+fn add_crate_error(db: &sled::Db, name: &str, version: &str, err: &str) {
+    let error_tree = db.open_tree(ERROR_TREE).unwrap();
+    error_tree.insert(name.as_bytes(), bincode::serialize(&(version, err)).unwrap()).unwrap();
 }
 
 fn purge_crate(db: &sled::Db, name: &str) {
@@ -448,7 +482,7 @@ fn purge_crate(db: &sled::Db, name: &str) {
     let crate_tree = db.open_tree(CRATE_TREE).unwrap();
     let ret: Result<(), TransactionError<Void>> = (&**db, &param_tree, &ret_tree, &fn_tree, &crate_tree)
         .transaction(|(_db, param_tree, ret_tree, fn_tree, crate_tree)| {
-            let (_version, fn_ids): (String, Vec<u64>) = match crate_tree.remove(name).unwrap() {
+            let (_version, fn_ids): (String, Vec<u64>) = match crate_tree.remove(name.as_bytes()).unwrap() {
                 Some(bs) => bincode::deserialize(&bs).unwrap(),
                 None => return Ok(()),
             };
