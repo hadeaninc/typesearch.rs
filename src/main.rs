@@ -2,9 +2,11 @@ use reeves;
 
 use anyhow::{Context, Result, bail};
 use either::Either;
+use futures::executor::ThreadPool;
+use futures::stream::{FuturesUnordered, StreamExt};
+use futures::task::SpawnExt;
 use isahc::prelude::*;
 use log::{debug, info, warn};
-use rayon::prelude::*;
 use serde::{Serialize, Deserialize};
 use std::cmp;
 use std::env;
@@ -115,17 +117,17 @@ fn main() -> Result<()> {
 
         ReevesCmd::AnalyzeAndSave { crate_path } => {
             info!("analyzing crate path {}", crate_path.display());
-            let (krate_name, krate_version, fndetails) = reeves::analyze_crate_path(&crate_path);
+            let (crate_name, crate_version, fndetails) = reeves::analyze_crate_path(&crate_path);
             let db = reeves::open_db(&opt.db);
             match fndetails {
                 Ok(fndetails) => {
                     info!("finished analysing functions, inserting {} function details into db", fndetails.len());
-                    reeves::save_analysis(&db, &krate_name, &krate_version, fndetails);
+                    reeves::save_analysis(&db, &crate_name, &crate_version, fndetails);
                 },
                 Err(err) => {
                     let err = format!("{:?}", err);
                     warn!("analysis failed, saving error to db: {}", err);
-                    reeves::save_analysis_error(&db, &krate_name, &krate_version, &err);
+                    reeves::save_analysis_error(&db, &crate_name, &crate_version, &err);
                 },
             }
             info!("finished inserting into db");
@@ -169,11 +171,7 @@ fn main() -> Result<()> {
             let db = reeves::open_db(&opt.db);
 
             info!("considering {} crates", crates.crates.len());
-            let count = Mutex::new(CratesProgressCounter { errored: 0, processed: 0, total: crates.crates.len() });
-            // TODO: stop iteration on panic or report somehow?
-            crates.crates.par_iter().for_each(|krate| {
-                cli_container_analyze_and_save(&db, panamax_mirror_path, &krate.name, &krate.version, &count)
-            });
+            cli_container_parallel_process_crates(&db, panamax_mirror_path, &mut crates.crates.into_iter().map(|krate| (krate.name, krate.version)));
         }
 
         ReevesCmd::AnalyzeAllCrates => {
@@ -189,15 +187,10 @@ fn main() -> Result<()> {
             let crates: Vec<_> = index.crates().map(|c| (c.name().to_owned(), c.highest_version().version().to_owned())).collect();
 
             info!("looking at {} crates to filter those already in db", crates.len());
-            let crates: Vec<_> = crates.into_par_iter().filter(|(name, version)| !reeves::has_crate(&db, name, version)).collect();
+            let crates: Vec<_> = crates.into_iter().filter(|(name, version)| !reeves::has_crate(&db, name, version)).collect();
 
             info!("considering {} crates", crates.len());
-            let count = Mutex::new(CratesProgressCounter { errored: 0, processed: 0, total: crates.len() });
-            // TODO: stop iteration on panic or report somehow?
-            crates.par_iter().for_each(|(name, version)| {
-                cli_container_analyze_and_save(&db, panamax_mirror_path, name, version, &count)
-            });
-            info!("finished: {:?}", count);
+            cli_container_parallel_process_crates(&db, panamax_mirror_path, &mut crates.into_iter());
         }
 
         ReevesCmd::LoadTextSearch => {
@@ -246,9 +239,31 @@ struct CratesProgressCounter {
     total: usize,
 }
 
-fn cli_container_analyze_and_save(db: &sled::Db, panamax_mirror_path: &Path, name: &str, version: &str, count: &Mutex<CratesProgressCounter>) {
+fn cli_container_parallel_process_crates(db: &sled::Db, panamax_mirror_path: &Path, crates: &mut dyn ExactSizeIterator<Item=(String, String)>) {
+    let count = Mutex::new(CratesProgressCounter { errored: 0, processed: 0, total: crates.len() });
+    let pool = ThreadPool::new().unwrap();
+    // TODO: stop iteration on panic or report somehow?
+    let mut futs: FuturesUnordered<_> = crates.into_iter()
+        .map(|(name, version)| {
+            let panamax_mirror_path = panamax_mirror_path.to_owned();
+            pool.spawn_with_handle(futures::future::lazy(move |_| {
+                info!("analyzing crate {}-{}", name, version);
+                let res = container_analyze_crate(&panamax_mirror_path, &name, &version);
+                ((name, version), res)
+            })).unwrap()
+        })
+        .collect();
+    futures::executor::block_on(async {
+        while let Some(((name, version), res)) = futs.next().await {
+            cli_finish_and_save_analysis(&db, res, &name, &version, &count)
+        }
+    });
+    info!("finished: {:?}", count);
+}
+
+fn cli_finish_and_save_analysis(db: &sled::Db, res: Result<Either<Vec<FnDetail>, String>>, name: &str, version: &str, count: &Mutex<CratesProgressCounter>) {
     info!("analyzing crate {}-{}", name, version);
-    match container_analyze_crate(panamax_mirror_path, name, version) {
+    match res {
         Ok(Either::Left(fndetails)) => {
             info!("finished analysing functions for {} {}, inserting {} function details into db",
                   name, version, fndetails.len());
