@@ -97,6 +97,10 @@ enum ReevesCmd {
     DebugDB,
 }
 
+fn ready_rust_analyzer() {
+    env::set_var(ENV_RUST_ANALYZER_EXEC, "1")
+}
+
 fn main() -> Result<()> {
     env_logger::init();
 
@@ -106,9 +110,9 @@ fn main() -> Result<()> {
         let mut cmd = Command::new(env::var_os(ENV_RUST_ANALYZER_BINARY).unwrap());
         cmd.args(env::args_os().skip(1)).exec();
         panic!("did not exec");
-    } else {
-        env::set_var(ENV_RUST_ANALYZER_EXEC, "1");
     }
+
+    hadean::init();
 
     let opt = ReevesOpt::from_args();
 
@@ -117,6 +121,8 @@ fn main() -> Result<()> {
     match opt.cmd {
 
         ReevesCmd::AnalyzeAndSave { crate_path } => {
+            ready_rust_analyzer();
+
             info!("analyzing crate path {}", crate_path.display());
             let (crate_name, crate_version, fndetails) = reeves::analyze_crate_path(&crate_path);
             let db = reeves::open_db(&opt.db);
@@ -135,6 +141,8 @@ fn main() -> Result<()> {
         },
 
         ReevesCmd::AnalyzeAndPrint { crate_path } => {
+            ready_rust_analyzer();
+
             let (crate_name, crate_version, res) = reeves::analyze_crate_path(&crate_path);
             let res = match res {
                 Ok(fndetails) => Either::Left(fndetails),
@@ -152,6 +160,17 @@ fn main() -> Result<()> {
             io::stdout().write_all(&out).unwrap();
         },
 
+        ReevesCmd::AnalyzeLocal => {
+            let crates = PlayCrates {
+                crates: vec![PlayCrate { name: "serde".into(), version: "1.0.0".into() }],
+            };
+
+            let db = reeves::open_db(&opt.db);
+
+            info!("considering {} crates", crates.crates.len());
+            cli_container_parallel_process_crates(&db, panamax_mirror_path, &mut crates.crates.into_iter().map(|krate| (krate.name, krate.version)));
+        },
+
         ReevesCmd::AnalyzeTop100Crates => {
             let panamax_mirror_path = &opt.panamax_mirror;
 
@@ -163,8 +182,6 @@ fn main() -> Result<()> {
             struct PlayCrate {
                 name: String,
                 version: String,
-                #[allow(unused)]
-                id: String, // the alias play uses
             }
             let mut res = isahc::get("https://play.rust-lang.org/meta/crates").unwrap();
             let crates: PlayCrates = res.json().unwrap();
@@ -263,7 +280,7 @@ struct CratesProgressCounter {
 //}
 fn cli_container_parallel_process_crates(db: &sled::Db, panamax_mirror_path: &Path, crates: &mut dyn ExactSizeIterator<Item=(String, String)>) {
     let count = Mutex::new(CratesProgressCounter { errored: 0, processed: 0, total: crates.len() });
-    let mut pool = HadeanPool::new(8);
+    let mut pool = HadeanPool::new(2);
     #[derive(Serialize, Deserialize)]
     struct Ctx {
         panamax_mirror_path: PathBuf,
