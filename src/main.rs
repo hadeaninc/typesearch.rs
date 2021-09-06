@@ -1,7 +1,8 @@
 use reeves;
 
+use anyhow::{Context, Result, bail};
 use isahc::prelude::*;
-use log::{debug, info};
+use log::{debug, info, warn};
 use rayon::prelude::*;
 use serde::Deserialize;
 use std::cmp;
@@ -84,7 +85,7 @@ enum ReevesCmd {
     DebugDB,
 }
 
-fn main() {
+fn main() -> Result<()> {
     env_logger::init();
 
     // See comment on ENV_RUST_ANALYZER_EXEC
@@ -118,7 +119,8 @@ fn main() {
         },
 
         ReevesCmd::ContainerAnalyzeAndPrint { crate_path } => {
-            let (krate_name, krate_version, fndetails) = container_analyze_crate_path(&crate_path);
+            let (krate_name, krate_version, fndetails) = container_analyze_crate_path(&crate_path)
+                .with_context(|| format!("failed to analyze path {} in a container", crate_path.display()))?;
             let out = serde_json::to_vec(&(krate_name, krate_version, fndetails)).unwrap();
             io::stdout().write_all(&out).unwrap();
         },
@@ -145,9 +147,16 @@ fn main() {
             let total_crates = crates.crates.len();
             use std::sync::atomic::{AtomicUsize, Ordering};
             let progress = AtomicUsize::new(0);
+            // TODO: stop iteration on panic or report somehow?
             crates.crates.par_iter().for_each(|krate| {
                 info!("analyzing crate {}-{}", krate.name, krate.version);
-                let fndetails = container_analyze_crate(panamax_mirror_path, &krate.name, &krate.version);
+                let fndetails = match container_analyze_crate(panamax_mirror_path, &krate.name, &krate.version) {
+                    Ok(fds) => fds,
+                    Err(e) => {
+                        warn!("failed to analyze {}-{}: {:?}", krate.name, krate.version, e);
+                        return
+                    }
+                };
                 info!("finished analysing functions for {} {}, inserting {} function details into db", krate.name, krate.version, fndetails.len());
                 reeves::save_analysis(&db, &krate.name, &krate.version, fndetails);
                 let current_progress = progress.fetch_add(1, Ordering::SeqCst)+1;
@@ -167,33 +176,38 @@ fn main() {
             info!("identifying crates to analyze");
             let crates: Vec<_> = index.crates().map(|c| (c.name().to_owned(), c.highest_version().version().to_owned())).collect();
 
+            info!("looking at {} crates to filter those already in db", crates.len());
+            let crates: Vec<_> = crates.into_par_iter().filter(|(name, version)| !reeves::has_crate(&db, name, version)).collect();
+
             use std::sync::Mutex;
             #[derive(Debug)]
             struct Counter {
-                considered: usize,
+                errored: usize,
                 processed: usize,
             }
-            let count = Mutex::new(Counter { considered: 0, processed: 0 });
-            // TODO: handle failures
+            let count = Mutex::new(Counter { errored: 0, processed: 0 });
             info!("considering {} crates", crates.len());
+            // TODO: stop iteration on panic or report somehow?
             crates.par_iter().for_each(|(name, version)| {
-                let processed;
-                if !reeves::has_crate(&db, name, version) {
-                    info!("analyzing crate {}-{}", name, version);
-                    let fndetails = container_analyze_crate(panamax_mirror_path, &name, &version);
-                    info!("finished analysing functions for {} {}, inserting {} function details into db", name, version, fndetails.len());
-                    reeves::save_analysis(&db, &name, &version, fndetails);
-                    info!("finished inserting into db for {} {}", name, version);
-                    processed = 1
-                } else {
-                    info!("skipping crate {}-{}, already in db", name, version);
-                    processed = 0
+                info!("analyzing crate {}-{}", name, version);
+                let fndetails = match container_analyze_crate(panamax_mirror_path, name, version) {
+                    Ok(fds) => fds,
+                    Err(e) => {
+                        warn!("failed to analyze {}-{}: {:?}", name, version, e);
+                        {
+                            let mut count = count.lock().unwrap();
+                            count.errored += 1;
+                        }
+                        return
+                    }
                 };
+                info!("finished analysing functions for {} {}, inserting {} function details into db", name, version, fndetails.len());
+                reeves::save_analysis(&db, &name, &version, fndetails);
+                info!("finished inserting into db for {} {}", name, version);
                 {
                     let mut count = count.lock().unwrap();
-                    count.considered += 1;
-                    count.processed += processed;
-                    println!("current count: {} processed, {} / {} total", count.processed, count.considered, crates.len());
+                    count.processed += 1;
+                    println!("progress: {} processed, {} errored, {} remaining", count.processed, count.errored, crates.len() - (count.processed + count.errored));
                 }
             });
             println!("finished: {:?}", count);
@@ -234,32 +248,37 @@ fn main() {
         }
 
     }
+
+    Ok(())
 }
 
-fn container_analyze_crate(panamax_mirror_path: &Path, krate_name: &str, krate_version: &str) -> Vec<FnDetail> {
+fn container_analyze_crate(panamax_mirror_path: &Path, krate_name: &str, krate_version: &str) -> Result<Vec<FnDetail>> {
     let crate_tar_path = crate_to_tar_path(panamax_mirror_path, krate_name, krate_version);
     let crate_tar_path = crate_tar_path.to_str().unwrap(); // where the crate tar currently is
     let crate_path = format!("{}/{}-{}", CRATE_WORK_DIR, krate_name, krate_version); // where it will get extracted to
 
     fs::create_dir_all(CRATE_WORK_DIR).unwrap();
-    fs::remove_dir_all(&crate_path).unwrap();
+    if let Err(e) = fs::remove_dir_all(&crate_path) {
+        if e.kind() != io::ErrorKind::NotFound { panic!("{}", e) }
+    }
 
     let res = Command::new("tar")
         .args(&["-C", CRATE_WORK_DIR, "-xzf", crate_tar_path])
         .status().unwrap();
     if !res.success() {
-        panic!("failed to create extracted crate")
+        bail!("failed to create extracted crate")
     }
 
-    let (krate_name_, krate_version_, fndetails) = container_analyze_crate_path(crate_path.as_ref());
-    assert_eq!((krate_name, krate_version), (krate_name_.as_str(), krate_version_.as_str()));
-
+    let res = container_analyze_crate_path(crate_path.as_ref());
     fs::remove_dir_all(crate_path).unwrap();
 
-    fndetails
+    let (krate_name_, krate_version_, fndetails) = res.context("failed to analyze crate")?;
+    assert_eq!((krate_name, krate_version), (krate_name_.as_str(), krate_version_.as_str()));
+
+    Ok(fndetails)
 }
 
-fn container_analyze_crate_path(path: &Path) -> (String, String, Vec<FnDetail>) {
+fn container_analyze_crate_path(path: &Path) -> Result<(String, String, Vec<FnDetail>)> {
     const OUTPUT_LIMIT: usize = 500;
     fn snip_output(mut s: &[u8]) -> String {
         let mut didsnip = false;
@@ -293,7 +312,7 @@ fn container_analyze_crate_path(path: &Path) -> (String, String, Vec<FnDetail>) 
         .output().unwrap();
 
     if !res.status.success() {
-        panic!("failed to prep for analysis {}:\n====\n{}\n====\n{}\n====", path.display(), snip_output(&res.stdout), snip_output(&res.stderr))
+        bail!("failed to prep for analysis {}:\n====\n{}\n====\n{}\n====", path.display(), snip_output(&res.stdout), snip_output(&res.stderr))
     }
 
     let res = Command::new("podman").args(&["run", "--rm"])
@@ -310,13 +329,13 @@ fn container_analyze_crate_path(path: &Path) -> (String, String, Vec<FnDetail>) 
         .output().unwrap();
 
     if !res.status.success() {
-        panic!("failed to analyze {}:\n====\n{}\n====\n{}\n====", path.display(), snip_output(&res.stdout), snip_output(&res.stderr))
+        bail!("failed to analyze {}:\n====\n{}\n====\n{}\n====", path.display(), snip_output(&res.stdout), snip_output(&res.stderr))
     }
 
     match serde_json::from_slice(&res.stdout) {
-        Ok(r) => r,
+        Ok(r) => Ok(r),
         Err(e) => {
-            panic!("failed to deserialize output from analysis in container: {}\n====\n{}\n====",
+            bail!("failed to deserialize output from analysis in container: {}\n====\n{}\n====",
                    e, String::from_utf8_lossy(&res.stdout[..cmp::min(res.stdout.len(), OUTPUT_LIMIT)]))
         },
     }

@@ -2602,6 +2602,7 @@ dependencies = [
  "actix-files",
  "actix-rt",
  "actix-web",
+ "anyhow",
  "base_db",
  "bincode",
  "crates-index",
