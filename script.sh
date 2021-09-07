@@ -66,7 +66,6 @@ elif [ "$1" = run-release ]; then
 
 elif [ "$1" = prep-container ]; then
     shift
-    ./script.sh build release
     (cd rust-analyzer && cargo build --release)
     rm -rf container-state
     mkdir container-state

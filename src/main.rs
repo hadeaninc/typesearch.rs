@@ -291,7 +291,7 @@ fn cli_container_parallel_process_crates(db: &sled::Db, panamax_mirror_path: &Pa
     let mut futs: FuturesUnordered<_> = crates.into_iter()
         .map(|(name, version)| {
             let panamax_mirror_path = panamax_mirror_path.to_owned();
-            pool.execute(move |Ctx { panamax_mirror_path, name, version }: Ctx| {
+            pool.execute(|Ctx { panamax_mirror_path, name, version }| {
                 info!("analyzing crate {}-{}", name, version);
                 let res = container_analyze_crate(&panamax_mirror_path, &name, &version);
                 ((name, version), res.map_err(|e| format!("{:?}", e)))
