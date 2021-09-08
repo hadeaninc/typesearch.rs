@@ -2,6 +2,7 @@ use reeves;
 
 use anyhow::{Context, Result, bail};
 use either::Either;
+use flate2::read::GzDecoder;
 use futures::executor::ThreadPool;
 use futures::stream::{FuturesUnordered, StreamExt};
 use futures::task::SpawnExt;
@@ -11,13 +12,15 @@ use log::{debug, info, warn};
 use serde::{Serialize, Deserialize};
 use std::cmp;
 use std::env;
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::os::unix::process::CommandExt;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
 use structopt::StructOpt;
+use tempfile::TempDir;
 
 use reeves_types::*;
 
@@ -112,7 +115,10 @@ fn main() -> Result<()> {
         panic!("did not exec");
     }
 
-    hadean::init();
+    if env::var_os("NO_HADEAN").is_none() {
+        assert_ne!(env::current_exe().unwrap().to_str().unwrap(), "/reeves");
+        hadean::init();
+    }
 
     let opt = ReevesOpt::from_args();
 
@@ -257,6 +263,56 @@ struct CratesProgressCounter {
     total: usize,
 }
 
+const FS_BYTES: &[u8] = include_bytes!("../container-state/fs.tar.gz");
+const BWRAP_BYTES: &[u8] = include_bytes!("../container-state/bwrap.gz");
+
+// TODO: this doesn't get properly cleaned up if distributed processes crash
+struct ContainerEnv {
+    wd: PathBuf,
+}
+impl ContainerEnv {
+    fn bwrap_path(&self) -> PathBuf {
+        self.wd.join("bwrap")
+    }
+    fn cargo_index_path(&self) -> PathBuf {
+        self.wd.join("index")
+    }
+    fn fs_path(&self) -> PathBuf {
+        self.wd.join("fs")
+    }
+}
+
+fn prep_container_env() -> ContainerEnv {
+    use std::cell::RefCell;
+    thread_local!{
+        static WORKDIR: RefCell<Option<TempDir>> = RefCell::new(None);
+    };
+    WORKDIR.with(|workdir| {
+        if let Some(wd) = workdir.borrow().as_ref() {
+            return ContainerEnv { wd: wd.path().to_owned() }
+        }
+
+        info!("preparing container environment");
+
+        let mut workdir = workdir.borrow_mut();
+        let td = TempDir::new().unwrap();
+        let ce = ContainerEnv { wd: td.path().to_owned() };
+        *workdir = Some(td);
+
+        let bwrap_file = OpenOptions::new()
+            .create_new(true).append(true).mode(0o500)
+            .open(ce.bwrap_path()).unwrap();
+        io::copy(&mut GzDecoder::new(BWRAP_BYTES), &mut {bwrap_file}).unwrap();
+
+        fs::create_dir(ce.cargo_index_path()).unwrap();
+
+        let mut ar = tar::Archive::new(GzDecoder::new(FS_BYTES));
+        ar.unpack(ce.fs_path()).unwrap();
+
+        ce
+    })
+}
+
 //fn cli_container_parallel_process_crates(db: &sled::Db, panamax_mirror_path: &Path, crates: &mut dyn ExactSizeIterator<Item=(String, String)>) {
 //    let count = Mutex::new(CratesProgressCounter { errored: 0, processed: 0, total: crates.len() });
 //    let pool = ThreadPool::new().unwrap();
@@ -278,24 +334,28 @@ struct CratesProgressCounter {
 //    });
 //    info!("finished: {:?}", count);
 //}
+
 fn cli_container_parallel_process_crates(db: &sled::Db, panamax_mirror_path: &Path, crates: &mut dyn ExactSizeIterator<Item=(String, String)>) {
     let count = Mutex::new(CratesProgressCounter { errored: 0, processed: 0, total: crates.len() });
-    let mut pool = HadeanPool::new(2);
+    let mut pool = HadeanPool::new(8);
+
     #[derive(Serialize, Deserialize)]
     struct Ctx {
-        panamax_mirror_path: PathBuf,
+        crate_tar: Vec<u8>,
         name: String,
         version: String,
     }
     // TODO: stop iteration on panic or report somehow?
     let mut futs: FuturesUnordered<_> = crates.into_iter()
         .map(|(name, version)| {
-            let panamax_mirror_path = panamax_mirror_path.to_owned();
-            pool.execute(|Ctx { panamax_mirror_path, name, version }| {
+            let crate_tar_path = crate_to_tar_path(panamax_mirror_path, &name, &version);
+            let crate_tar = fs::read(crate_tar_path).unwrap();
+            pool.execute(|Ctx { crate_tar, name, version }| {
+                let container_env = prep_container_env();
                 info!("analyzing crate {}-{}", name, version);
-                let res = container_analyze_crate(&panamax_mirror_path, &name, &version);
+                let res = container_analyze_crate(container_env, &crate_tar, &name, &version);
                 ((name, version), res.map_err(|e| format!("{:?}", e)))
-            }, Ctx { panamax_mirror_path, name, version })
+            }, Ctx { crate_tar, name, version })
         })
         .collect();
     futures::executor::block_on(async {
@@ -307,7 +367,7 @@ fn cli_container_parallel_process_crates(db: &sled::Db, panamax_mirror_path: &Pa
 }
 
 fn cli_finish_and_save_analysis(db: &sled::Db, res: Result<Either<Vec<FnDetail>, String>>, name: &str, version: &str, count: &Mutex<CratesProgressCounter>) {
-    info!("analyzing crate {}-{}", name, version);
+    info!("saving analysis for crate {}-{}", name, version);
     match res {
         Ok(Either::Left(fndetails)) => {
             info!("finished analysing functions for {} {}, inserting {} function details into db",
@@ -336,24 +396,16 @@ fn cli_finish_and_save_analysis(db: &sled::Db, res: Result<Either<Vec<FnDetail>,
     }
 }
 
-fn container_analyze_crate(panamax_mirror_path: &Path, crate_name: &str, crate_version: &str) -> Result<Either<Vec<FnDetail>, String>> {
-    let crate_tar_path = crate_to_tar_path(panamax_mirror_path, crate_name, crate_version);
-    let crate_tar_path = crate_tar_path.to_str().unwrap(); // where the crate tar currently is
+fn container_analyze_crate(container_env: ContainerEnv, crate_bytes: &[u8], crate_name: &str, crate_version: &str) -> Result<Either<Vec<FnDetail>, String>> {
+    let mut ar = tar::Archive::new(GzDecoder::new(crate_bytes));
     let crate_path = format!("{}/{}-{}", CRATE_WORK_DIR, crate_name, crate_version); // where it will get extracted to
 
     fs::create_dir_all(CRATE_WORK_DIR).unwrap();
     if let Err(e) = fs::remove_dir_all(&crate_path) {
         if e.kind() != io::ErrorKind::NotFound { panic!("{}", e) }
     }
-
-    let res = Command::new("tar")
-        .args(&["-C", CRATE_WORK_DIR, "-xzf", crate_tar_path])
-        .status().unwrap();
-    if !res.success() {
-        bail!("failed to create extracted crate")
-    }
-
-    let res = container_analyze_crate_path(crate_path.as_ref());
+    ar.unpack(CRATE_WORK_DIR).context("failed to create extracted crate")?;
+    let res = container_analyze_crate_path(container_env, crate_path.as_ref());
     fs::remove_dir_all(crate_path).unwrap();
 
     let res = res.context("failed to analyze crate")?;
@@ -362,8 +414,8 @@ fn container_analyze_crate(panamax_mirror_path: &Path, crate_name: &str, crate_v
     Ok(res.res)
 }
 
-fn container_analyze_crate_path(path: &Path) -> Result<AnalyzeAndPrintOutput> {
-    const OUTPUT_LIMIT: usize = 500;
+fn container_analyze_crate_path(container_env: ContainerEnv, crate_path: &Path) -> Result<AnalyzeAndPrintOutput> {
+    const OUTPUT_LIMIT: usize = 5000;
     fn snip_output(mut s: &[u8]) -> String {
         let mut didsnip = false;
         if s.len() > OUTPUT_LIMIT {
@@ -377,43 +429,69 @@ fn container_analyze_crate_path(path: &Path) -> Result<AnalyzeAndPrintOutput> {
         out
     }
 
-    let cwd = env::current_dir().unwrap();
-    let cwd = cwd.to_str().unwrap();
+    let tempdir = TempDir::new().unwrap();
+
+    let bwrap_path = container_env.bwrap_path();
+    let fs_path = container_env.fs_path();
+    let cargo_cache_path = tempdir.path().join("cache");
+    let cargo_index_path = container_env.cargo_index_path();
+    let cargo_src_path = tempdir.path().join("src");
+    fs::create_dir(&cargo_cache_path).unwrap();
+    fs::create_dir(&cargo_src_path).unwrap();
+
+    // Stringify where necessary
+    let crate_path = crate_path.to_str().unwrap();
+    let fs_path = fs_path.to_str().unwrap();
+    let cargo_cache_path = cargo_cache_path.to_str().unwrap();
+    let cargo_index_path = cargo_index_path.to_str().unwrap();
+    let cargo_src_path = cargo_src_path.to_str().unwrap();
 
     // We need to do these so when we actually invoke the crate build scripts etc via rust-analyzer, everything is
     // already downloaded so we can isolate network access
-    let res = Command::new("podman").args(&["run", "--rm"])
-        // Basics
-        .args(&["-v", &format!("{}/container-state:/work", cwd), "-v", &format!("{}:/crate", path.display())])
-        .args(&["-e=RUSTUP_HOME=/work/rustup", "-e=CARGO_HOME=/work/cargo"])
-        // Custom
-        .args(&["-w=/crate", "--net=host"])
-        // Command
-        .args(&["ubuntu:20.04", "bash", "-c"])
+    let res = Command::new(bwrap_path)
+        .args(&["--bind", fs_path, "/", "--bind", crate_path, "/crate", "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"])
+        // CUSTOM
+        .args(&["--bind", cargo_cache_path, "/rust/cargo/registry/cache"])
+        // CUSTOM
+        .args(&["--bind", cargo_index_path, "/rust/cargo/registry/index"])
+        // CUSTOM
+        .args(&["--bind", cargo_src_path, "/rust/cargo/registry/src"])
+        .args(&["--remount-ro", "/"])
+        .args(&["--die-with-parent", "--clearenv", "--unshare-all", "--uid", "0", "--gid", "0", "--chdir", "/crate"])
+        .args(&["--setenv", "RUSTUP_HOME", "/rust/rustup", "--setenv", "CARGO_HOME", "/rust/cargo"])
+        // CUSTOM
+        .args(&["--share-net"])
+        .args(&["/bin/bash", "-c"])
         // TODO: ideally generate-lockfile would use --offline, but it seems to have an issue with a replaced registry
         // when attempting to generate a lockfile for serde-1.0.127
-        .arg("/work/cargo/bin/cargo generate-lockfile && /work/cargo/bin/cargo metadata >/dev/null")
+        .arg("/rust/cargo/bin/cargo generate-lockfile && /rust/cargo/bin/cargo fetch >/dev/null")
         .output().unwrap();
 
     if !res.status.success() {
-        bail!("failed to prep for analysis {}:\n====\n{}\n====\n{}\n====", path.display(), snip_output(&res.stdout), snip_output(&res.stderr))
+        bail!("failed to prep for analysis {}:\n====\n{}\n====\n{}\n====", crate_path, snip_output(&res.stdout), snip_output(&res.stderr))
     }
 
-    let res = Command::new("podman").args(&["run", "--rm"])
-        // Basics
-        // NOTE: these are read-only
-        .args(&["-v", &format!("{}/container-state:/work:ro", cwd), "-v", &format!("{}:/crate:ro", path.display())])
-        .args(&["-e=RUSTUP_HOME=/work/rustup", "-e=CARGO_HOME=/work/cargo"])
-        // Custom
-        .args(&["-w=/work", "--net=none"])
-        .args(&["-v", &format!("{}:/reeves:ro", &env::current_exe().unwrap().to_str().unwrap())])
-        // Command
-        .args(&["ubuntu:20.04", "bash", "-c"])
-        .arg(format!("PATH=$PATH:/work/cargo/bin /reeves --rust-analyzer /work/rust-analyzer {} /crate", ANALYZE_AND_PRINT_COMMAND))
+    let res = Command::new(container_env.bwrap_path())
+        .args(&["--bind", fs_path, "/", "--bind", crate_path, "/crate", "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"])
+        // CUSTOM
+        .args(&["--ro-bind", cargo_cache_path, "/rust/cargo/registry/cache"])
+        // CUSTOM
+        .args(&["--ro-bind", cargo_index_path, "/rust/cargo/registry/index"])
+        // CUSTOM
+        .args(&["--ro-bind", cargo_src_path, "/rust/cargo/registry/src"])
+        // CUSTOM
+        .args(&["--ro-bind", &env::current_exe().unwrap().to_str().unwrap(), "/reeves"])
+        .args(&["--remount-ro", "/"])
+        .args(&["--die-with-parent", "--clearenv", "--unshare-all", "--uid", "0", "--gid", "0", "--chdir", "/crate"])
+        .args(&["--setenv", "RUSTUP_HOME", "/rust/rustup", "--setenv", "CARGO_HOME", "/rust/cargo"])
+        // CUSTOM
+        .args(&["--setenv", "NO_HADEAN", "1"])
+        .args(&["/bin/bash", "-c"])
+        .arg(format!("PATH=$PATH:/rust/cargo/bin /reeves --rust-analyzer /rust/rust-analyzer {} /crate", ANALYZE_AND_PRINT_COMMAND))
         .output().unwrap();
 
     if !res.status.success() {
-        bail!("failed to analyze {}:\n====\n{}\n====\n{}\n====", path.display(), snip_output(&res.stdout), snip_output(&res.stderr))
+        bail!("failed to analyze {}:\n====\n{}\n====\n{}\n====", crate_path, snip_output(&res.stdout), snip_output(&res.stderr))
     }
 
     match serde_json::from_slice(&res.stdout) {

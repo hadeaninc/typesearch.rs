@@ -66,14 +66,17 @@ elif [ "$1" = run-release ]; then
 
 elif [ "$1" = prep-container ]; then
     shift
-    (cd rust-analyzer && cargo build --release)
     rm -rf container-state
     mkdir container-state
-    cp rust-analyzer/target/release/rust-analyzer container-state/
     cd container-state
-    export RUSTUP_HOME=$(pwd)/rustup
-    export CARGO_HOME=$(pwd)/cargo
-    export PATH=$PATH:$(pwd)/cargo/bin
+
+    # Rust analyzer
+    (cd ../rust-analyzer && cargo build --release)
+    cp ../rust-analyzer/target/release/rust-analyzer .
+
+    # Rust
+    export RUSTUP_HOME=$(pwd)/rust/rustup
+    export CARGO_HOME=$(pwd)/rust/cargo
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --no-modify-path --default-toolchain 1.54.0 --profile minimal -y --quiet
     rustup component add rust-src
     echo '
@@ -83,15 +86,24 @@ elif [ "$1" = prep-container ]; then
 replace-with = "mirror"
 
 [source.mirror]
-registry = "http://localhost:8888/git/crates.io-index"
+registry = "http://127.0.0.1:8888/git/crates.io-index"
 ' > $CARGO_HOME/config
-    podman pull ubuntu:20.04
+    mkdir -p $CARGO_HOME/registry/{cache,index,src}
 
-    ## Apparently this is the best way to update the registry - https://github.com/rust-lang/crater/pull/301/files
-    #podman run -it --rm --net host \
-    #    -w /work -e RUSTUP_HOME=/work/rustup -e CARGO_HOME=/work/cargo -v $(pwd):/work \
-    #    ubuntu:20.04 /work/cargo/bin/cargo install lazy_static || true
-    #echo "Ignore the error above if it just complains about 'there is nothing to install'"
+    # Main FS
+    podman pull ubuntu:20.04
+    podman rm -f -i reeves-tmp
+    podman create --name reeves-tmp ubuntu:20.04 /bin/true
+    podman export reeves-tmp > fs.tar
+    podman rm -f reeves-tmp
+    mkdir crate
+    tar -rf fs.tar crate/ rust/ rust-analyzer
+    rmdir crate
+    gzip fs.tar
+
+    # bwrap
+    cp ../bubblewrap-0.5.0/bwrap .
+    gzip -k bwrap
 
 elif [ "$1" = vim ]; then
     vim -p notes script.sh Cargo.toml src/main.rs src/lib.rs reeves-types/src/lib.rs page/src/lib.rs page/Cargo.toml src/server.rs
